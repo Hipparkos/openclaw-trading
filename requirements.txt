@@ -1,0 +1,4 @@
+ib-insync>=0.9.64,<1.0.0
+python-dotenv>=0.21.0,<2.0.0
+pyyaml>=6.0,<7.0
+tzdata>=2022.1
