@@ -27,11 +27,16 @@ class IBKRClient:
         self._subscriptions: List[Any] = []
         
         self.ib.disconnectedEvent += self._on_disconnected
+        self._subscriptions: List[Any] = []
+        self._is_reconnecting = False
 
     # Handle disconnect - start reconnect loop
     def _on_disconnected(self) -> None:
-        self.logger.warning("IBKR connection lost. Attempting runtime recovery...")
-        asyncio.create_task(self._reconnect_loop())
+        self.logger.warning("IBKR connection lost.")
+        if not self._is_reconnecting:
+            self.logger.info("Starting reconnection loop...")
+            self._is_reconnecting = True
+            asyncio.create_task(self._reconnect_loop())
 
     # Reconnect loop - attempt runtime recovery
     async def _reconnect_loop(self) -> None:
@@ -42,6 +47,7 @@ class IBKRClient:
                 await self.connect()
                 if self.ib.isConnected():
                     self.logger.info("Runtime recovery successful.")
+                    self._is_reconnecting = False  # Reset flag
                     await self.stream_market_data()
                     break
             except Exception as e:
@@ -120,9 +126,14 @@ class IBKRClient:
             await self.connect()
 
         self.logger.info("Initializing concurrent market data streams...")
-        
-        # Concurrently process all tickers to reduce startup latency
-        tasks = [self._subscribe_to_ticker(symbol) for symbol in self.tickers]
+        semaphore = asyncio.Semaphore(3) 
+
+        async def _bounded_subscribe(symbol: str):
+            async with semaphore:
+                await self._subscribe_to_ticker(symbol)
+                await asyncio.sleep(1) # Brief pause between ticker batches
+
+        tasks = [_bounded_subscribe(symbol) for symbol in self.tickers]
         await asyncio.gather(*tasks)
 
     # Disconnect cleanly - stop IB and handlers

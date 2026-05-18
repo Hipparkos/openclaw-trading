@@ -3,6 +3,7 @@ import logging
 import signal
 import sys
 from logging.handlers import RotatingFileHandler
+from execution.order_manager import OrderManager
 from pathlib import Path
 from typing import Any, Dict
 
@@ -62,6 +63,7 @@ async def main() -> None:
         sys.exit(1)
 
     client = IBKRClient(settings)
+    order_manager = OrderManager(client)
     shutdown_event = asyncio.Event()
     loop = asyncio.get_running_loop()
 
@@ -80,6 +82,15 @@ async def main() -> None:
         logger.info("Starting...")
         await client.stream_market_data()
         
+        logger.info("Testing Order Execution routing...")
+        test_ticker = settings["tickers"][0] if settings["tickers"] else "AAPL"
+        
+        async def _test_trade():
+            await asyncio.sleep(5)
+            await order_manager.place_market_order(test_ticker, "BUY", 1)
+            
+        asyncio.create_task(_test_trade())
+        
         await shutdown_event.wait()
 
     except asyncio.CancelledError:
@@ -88,6 +99,7 @@ async def main() -> None:
         logger.error(f"An error occurred in the execution loop: {e}", exc_info=True)
     finally:
         logger.info("Cleaning up connections...")
+        order_manager.close() # Clean up order event listeners
         client.disconnect()
 
 

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from ib_insync import LimitOrder, MarketOrder, Stock, StopOrder
+from data.ibkr_client import IBKRClient
 
 
 class OrderManager:
@@ -15,6 +16,8 @@ class OrderManager:
         self.currency = getattr(ib_client_or_ib, "currency", "USD")
 
         self.order_states: Dict[int, str] = {}
+        self.logger = logging.getLogger(__name__)
+        self._qualified_contracts: Dict[str, Stock] = {}
         self.logger = logging.getLogger("OrderManager")
         self._setup_logging()
 
@@ -71,8 +74,13 @@ class OrderManager:
 
     # Ensure contract valid - qualify with IB
     async def _qualify_stock(self, symbol: str) -> Stock:
+        if symbol in self._qualified_contracts:
+            return self._qualified_contracts[symbol]
+        
         contract = Stock(symbol, self.exchange, self.currency)
         await self.ib.qualifyContractsAsync(contract)
+
+        self._qualified_contracts[symbol] = contract
         return contract
 
     # Place and track order - submit via IB
