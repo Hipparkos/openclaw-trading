@@ -4,6 +4,8 @@ from typing import Any, Callable, Dict, List
 
 from ib_insync import IB, Stock
 
+from data.data_models import BarData
+
 
 class IBKRClient:
     # Initialize client - setup IB and settings
@@ -27,8 +29,26 @@ class IBKRClient:
         self._subscriptions: List[Any] = []
         
         self.ib.disconnectedEvent += self._on_disconnected
+        self.ib.errorEvent += self._on_error
         self._subscriptions: List[Any] = []
         self._is_reconnecting = False
+
+    # Handle IBKR errors
+    def _on_error(self, reqId: int, errorCode: int, errorString: str, contract: Any) -> None:
+        if errorCode == 162:
+            self.logger.warning(
+                "IBKR historical data pacing warning (162) for reqId %s. "
+                "Close other active IBKR/TWS sessions or reduce request frequency.",
+                reqId,
+            )
+            return
+
+        self.logger.error(
+            "IBKR error %s for reqId %s: %s",
+            errorCode,
+            reqId,
+            errorString,
+        )
 
     # Handle disconnect - start reconnect loop
     def _on_disconnected(self) -> None:
@@ -85,11 +105,17 @@ class IBKRClient:
                 return
 
             bar = bars[-1]
-            self.logger.info(
-                f"{symbol} {bar_size} "
-                f"{bar.date} O:{bar.open:.2f} H:{bar.high:.2f} "
-                f"L:{bar.low:.2f} C:{bar.close:.2f} V:{bar.volume}"
+            normalized_bar = BarData(
+                symbol=symbol,
+                timestamp=bar.date,
+                timeframe=bar_size,
+                open=float(bar.open),
+                high=float(bar.high),
+                low=float(bar.low),
+                close=float(bar.close),
+                volume=float(bar.volume),
             )
+            self.logger.info("Normalized bar update: %s", normalized_bar)
 
         return on_update
 
@@ -109,7 +135,7 @@ class IBKRClient:
         bars = await self.ib.reqHistoricalDataAsync(
             contract,
             endDateTime="",
-            durationStr="1 D",
+            durationStr="2 D",
             barSizeSetting=bar_size,
             whatToShow="TRADES",
             useRTH=False,

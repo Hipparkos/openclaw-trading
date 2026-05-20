@@ -102,17 +102,17 @@ class OrderManager:
 
     # Convenience market order - quick market submit
     async def place_market_order(self, symbol: str, action: str, quantity: float) -> Any:
-        order = MarketOrder(action.upper(), quantity)
+        order = MarketOrder(action.upper(), quantity, tif="DAY")
         return await self._place_order(symbol, order)
 
     # Convenience limit order - submit with cap price
     async def place_limit_order(self, symbol: str, action: str, quantity: float, price: float) -> Any:
-        order = LimitOrder(action.upper(), quantity, price)
+        order = LimitOrder(action.upper(), quantity, price, tif="DAY")
         return await self._place_order(symbol, order)
 
     # Convenience stop order - submit with stop price
     async def place_stop_order(self, symbol: str, action: str, quantity: float, stop_price: float) -> Any:
-        order = StopOrder(action.upper(), quantity, stop_price)
+        order = StopOrder(action.upper(), quantity, stop_price, tif="DAY")
         return await self._place_order(symbol, order)
 
     # Remove event hook - cleanup before exit

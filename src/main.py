@@ -11,6 +11,7 @@ import yaml
 from dotenv import load_dotenv
 
 from data.ibkr_client import IBKRClient
+from data.news_client import MarketauxClient
 
 
 class ConfigurationError(Exception):
@@ -32,6 +33,7 @@ def setup_logging() -> None:
             logging.StreamHandler(sys.stdout),
         ],
     )
+    logging.getLogger("ib_insync").setLevel(logging.WARNING)
 
 
 def load_settings(path: Path) -> Dict[str, Any]:
@@ -64,6 +66,7 @@ async def main() -> None:
 
     client = IBKRClient(settings)
     order_manager = OrderManager(client)
+    news_client = MarketauxClient()
     shutdown_event = asyncio.Event()
     loop = asyncio.get_running_loop()
 
@@ -80,6 +83,26 @@ async def main() -> None:
 
     try:
         logger.info("Starting...")
+        async def _stream_news() -> None:
+            while not shutdown_event.is_set():
+                for symbol in settings["tickers"]:
+                    news_items = await news_client.fetch_latest_news(symbol)
+                    for news_item in news_items:
+                        logger.info(
+                            "NEWS %s | %s | sentiment=%s | %s | %s",
+                            news_item.symbol,
+                            news_item.timestamp,
+                            news_item.sentiment_score,
+                            news_item.headline,
+                            news_item.url,
+                        )
+
+                try:
+                    await asyncio.wait_for(shutdown_event.wait(), timeout=300)
+                except asyncio.TimeoutError:
+                    continue
+
+        asyncio.create_task(_stream_news())
         await client.stream_market_data()
         
         logger.info("Testing Order Execution routing...")
