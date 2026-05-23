@@ -1,50 +1,24 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any, Dict
 
 from ib_insync import LimitOrder, MarketOrder, Stock, StopOrder
 from data.ibkr_client import IBKRClient
 
-
 class OrderManager:
     # Initialize manager - bind IB and prepare state
-    def __init__(self, ib_client_or_ib: Any) -> None:
-        self.ib = getattr(ib_client_or_ib, "ib", ib_client_or_ib)
-        self.exchange = getattr(ib_client_or_ib, "exchange", "SMART")
-        self.currency = getattr(ib_client_or_ib, "currency", "USD")
+    def __init__(self, client: IBKRClient) -> None:
+        self.client = client
+        self.ib = client.ib
+        self.exchange = client.exchange
+        self.currency = client.currency
 
         self.order_states: Dict[int, str] = {}
         self.logger = logging.getLogger(__name__)
         self._qualified_contracts: Dict[str, Stock] = {}
-        self.logger = logging.getLogger("OrderManager")
-        self._setup_logging()
 
         self.ib.orderStatusEvent += self._on_order_status
-
-    # Configure logging outputs - console + file
-    def _setup_logging(self) -> None:
-        if self.logger.handlers:
-            return
-
-        self.logger.setLevel(logging.INFO)
-        self.logger.propagate = False
-
-        log_dir = Path(__file__).resolve().parents[2] / "data" / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = log_dir / "order_manager.log"
-
-        formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-
-        stream_handler = logging.StreamHandler()
-        stream_handler.setFormatter(formatter)
-
-        file_handler = logging.FileHandler(log_path, encoding="utf-8")
-        file_handler.setFormatter(formatter)
-
-        self.logger.addHandler(stream_handler)
-        self.logger.addHandler(file_handler)
 
     # Log order updates - update internal state map
     def _on_order_status(self, trade: Any) -> None:
@@ -90,8 +64,7 @@ class OrderManager:
             trade = self.ib.placeOrder(contract, order)
 
             self.logger.info(
-                "Placed %s order for %s x%s",
-                getattr(order, "orderType", order.__class__.__name__),
+                "Placed order for %s x%s",
                 symbol,
                 getattr(order, "totalQuantity", "?"),
             )
@@ -115,7 +88,6 @@ class OrderManager:
         order = StopOrder(action.upper(), quantity, stop_price, tif="DAY")
         return await self._place_order(symbol, order)
 
-    # Remove event hook - cleanup before exit
     def close(self) -> None:
         try:
             self.ib.orderStatusEvent -= self._on_order_status

@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  openclaw:
+    build: .
+    container_name: openclaw_agent
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Map logs and DB to the host so data persists across rebuilds
+      - ./data/logs:/app/data/logs
+      - ./data/database:/app/data/database
+    extra_hosts:
+      # CRITICAL: Allows the container to access IB Gateway running on Windows
+      - "host.docker.internal:host-gateway"

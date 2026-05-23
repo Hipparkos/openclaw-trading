@@ -144,7 +144,17 @@ class IBKRClient:
         )
         bars.updateEvent += self._handle_bar_update(symbol, bar_size)
         self._subscriptions.append(bars)
-        self.logger.info(f"Fetched {symbol} {bar_size}")
+        latest_bar = bars[-1] if bars else None
+        if latest_bar is not None:
+            self.logger.info(
+                "Fetched %s %s bar with open=%s close=%s",
+                symbol,
+                bar_size,
+                latest_bar.open,
+                latest_bar.close,
+            )
+        else:
+            self.logger.info("Fetched %s %s bar", symbol, bar_size)
 
     # Stream market data - start streams concurrently
     async def stream_market_data(self) -> None:

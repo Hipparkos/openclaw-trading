@@ -20,7 +20,7 @@ class ConfigurationError(Exception):
 
 def setup_logging() -> None:
     # Setup logging - configure handlers
-    log_dir = Path(__file__).resolve().parents[2] / "data" / "logs"
+    log_dir = Path(__file__).resolve().parents[1] / "data" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
     logging.basicConfig(
