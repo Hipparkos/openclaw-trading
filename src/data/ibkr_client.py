@@ -13,19 +13,20 @@ class IBKRClient:
         self.logger = logging.getLogger("IBKRClient")
         
         connection = settings.get("connection", {})
-        self.host = connection.get("host", "localhost")
-        self.port = connection.get("port", 7497)  # TWS 7497 - Gateway 4002
-        self.client_id = connection.get("clientId", 1)
+        self.host = "ib_gateway"
+        self.port = 4002
+        self.client_id = connection.get("clientId", 10)
         
         # Modularized exchange and currency
         self.exchange = connection.get("exchange", "SMART")
         self.currency = connection.get("currency", "USD")
         
         self.tickers = settings.get("tickers", [])
+        self.data_buffer: Dict[str, Dict[str, List[BarData]]] = {}
 
         self.ib = IB()
-        self.max_retries = 5
-        self.retry_delay = 3
+        self.max_retries = 10
+        self.retry_delay = 7
         self._subscriptions: List[Any] = []
         
         self.ib.disconnectedEvent += self._on_disconnected
@@ -82,7 +83,7 @@ class IBKRClient:
                     self.host,
                     self.port,
                     clientId=self.client_id,
-                    timeout=5,
+                    timeout=30,
                 )
                 self.logger.info(f"Connected to IBKR at {self.host}:{self.port} with clientId {self.client_id}")
                 return
@@ -115,6 +116,7 @@ class IBKRClient:
                 close=float(bar.close),
                 volume=float(bar.volume),
             )
+            self.data_buffer.setdefault(symbol, {}).setdefault(bar_size, []).append(normalized_bar)
             self.logger.info("Normalized bar update: %s", normalized_bar)
 
         return on_update
@@ -123,6 +125,7 @@ class IBKRClient:
     async def _subscribe_to_ticker(self, symbol: str) -> None:
         contract = Stock(symbol, self.exchange, self.currency)
         await self.ib.qualifyContractsAsync(contract)
+        self.data_buffer.setdefault(symbol, {})
 
         bar_tasks = []
         for bar_size in ("1 min", "5 mins", "15 mins"):
@@ -135,13 +138,27 @@ class IBKRClient:
         bars = await self.ib.reqHistoricalDataAsync(
             contract,
             endDateTime="",
-            durationStr="2 D",
+            durationStr="3 D",
             barSizeSetting=bar_size,
             whatToShow="TRADES",
             useRTH=False,
             formatDate=1,
             keepUpToDate=True,
         )
+        buffered_bars = self.data_buffer.setdefault(symbol, {}).setdefault(bar_size, [])
+        for bar in bars:
+            buffered_bars.append(
+                BarData(
+                    symbol=symbol,
+                    timestamp=bar.date,
+                    timeframe=bar_size,
+                    open=float(bar.open),
+                    high=float(bar.high),
+                    low=float(bar.low),
+                    close=float(bar.close),
+                    volume=float(bar.volume),
+                )
+            )
         bars.updateEvent += self._handle_bar_update(symbol, bar_size)
         self._subscriptions.append(bars)
         latest_bar = bars[-1] if bars else None

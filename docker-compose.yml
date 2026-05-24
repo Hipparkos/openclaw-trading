@@ -1,16 +1,29 @@
 version: '3.8'
 
 services:
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:stable
+    container_name: ib_gateway
+    restart: always
+    environment:
+      TWS_USERID: ${IB_USER}
+      TWS_PASSWORD: ${IB_PASSWORD}
+      TRADING_MODE: paper
+      READ_ONLY_API: 'no'
+      IBC_AcceptIncomingConnectionAction: 'accept'
+    ports:
+      - "4002:4002"
+
   openclaw:
     build: .
     container_name: openclaw_agent
     restart: unless-stopped
+    depends_on:
+      - ib-gateway
+    ports:
+      - "8000:8000"
     env_file:
       - .env
     volumes:
-      # Map logs and DB to the host so data persists across rebuilds
       - ./data/logs:/app/data/logs
       - ./data/database:/app/data/database
-    extra_hosts:
-      # CRITICAL: Allows the container to access IB Gateway running on Windows
-      - "host.docker.internal:host-gateway"

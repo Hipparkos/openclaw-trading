@@ -1,3 +1,4 @@
+import contextlib
 import asyncio
 import logging
 import signal
@@ -5,8 +6,11 @@ import sys
 from logging.handlers import RotatingFileHandler
 from execution.order_manager import OrderManager
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel
+import uvicorn
 import yaml
 from dotenv import load_dotenv
 
@@ -18,8 +22,49 @@ class ConfigurationError(Exception):
     pass
 
 
+app = FastAPI(title="OpenClaw Trading API")
+
+
+class TradeRequest(BaseModel):
+    symbol: str
+    action: str
+    quantity: float
+
+
+@app.get("/status")
+async def get_status(request: Request) -> Dict[str, Any]:
+    # Expose live connection status.
+    client = request.app.state.client
+    settings = request.app.state.settings
+    return {
+        "ibkr_connected": client.ib.isConnected(),
+        "active_tickers": settings["tickers"],
+    }
+
+
+@app.post("/execute")
+async def execute_trade(request: Request, trade_request: TradeRequest) -> Dict[str, Any]:
+    # Allow external trade execution.
+    action = trade_request.action.upper()
+    if action not in {"BUY", "SELL"}:
+        raise HTTPException(status_code=400, detail="action must be BUY or SELL")
+
+    order_manager = request.app.state.order_manager
+    await order_manager.place_market_order(
+        trade_request.symbol,
+        action,
+        trade_request.quantity,
+    )
+    return {
+        "message": "Trade submitted successfully",
+        "symbol": trade_request.symbol,
+        "action": action,
+        "quantity": trade_request.quantity,
+    }
+
+
 def setup_logging() -> None:
-    # Setup logging - configure handlers
+    # Keep runtime logs and errors.
     log_dir = Path(__file__).resolve().parents[1] / "data" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -37,7 +82,7 @@ def setup_logging() -> None:
 
 
 def load_settings(path: Path) -> Dict[str, Any]:
-    # Load settings - read YAML config
+    # Load validated runtime configuration.
     if not path.exists():
         raise ConfigurationError(f"Configuration file missing at: {path}")
 
@@ -51,7 +96,7 @@ def load_settings(path: Path) -> Dict[str, Any]:
 
 
 async def main() -> None:
-    # Main entry - orchestrate client and loop
+    # Coordinate IBKR, API, shutdown.
     setup_logging()
     load_dotenv()
     logger = logging.getLogger("Main")
@@ -69,8 +114,15 @@ async def main() -> None:
     news_client = MarketauxClient()
     shutdown_event = asyncio.Event()
     loop = asyncio.get_running_loop()
+    server: Optional[uvicorn.Server] = None
+    server_task: Optional[asyncio.Task[Any]] = None
+
+    app.state.client = client
+    app.state.settings = settings
+    app.state.order_manager = order_manager
 
     def graceful_shutdown() -> None:
+        # Stop tasks without dropping orders.
         logger.info("Shutdown signal received. Initiating graceful exit...")
         shutdown_event.set()
 
@@ -84,6 +136,7 @@ async def main() -> None:
     try:
         logger.info("Starting...")
         async def _stream_news() -> None:
+            # Keep news polling off path.
             while not shutdown_event.is_set():
                 for symbol in settings["tickers"]:
                     news_items = await news_client.fetch_latest_news(symbol)
@@ -113,6 +166,10 @@ async def main() -> None:
             await order_manager.place_market_order(test_ticker, "BUY", 1)
             
         asyncio.create_task(_test_trade())
+
+        config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="warning")
+        server = uvicorn.Server(config)
+        server_task = asyncio.create_task(server.serve())
         
         await shutdown_event.wait()
 
@@ -122,6 +179,11 @@ async def main() -> None:
         logger.error(f"An error occurred in the execution loop: {e}", exc_info=True)
     finally:
         logger.info("Cleaning up connections...")
+        if server is not None:
+            server.should_exit = True
+        if server_task is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await asyncio.wait_for(server_task, timeout=5)
         order_manager.close() # Clean up order event listeners
         client.disconnect()
 
@@ -130,6 +192,6 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        # Failsafe if the interrupt hits outside the event loop
+        # Catch interrupts outside asyncio.
         logging.getLogger("Main").info("Stopped manually.")
         sys.exit(0)
