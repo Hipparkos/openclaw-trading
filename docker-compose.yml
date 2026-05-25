@@ -11,6 +11,7 @@ services:
       TRADING_MODE: paper
       READ_ONLY_API: 'no'
       IBC_AcceptIncomingConnectionAction: 'accept'
+      OLLAMA_HOST: http://ollama:11434
     ports:
       - "4002:4002"
 
@@ -27,3 +28,12 @@ services:
     volumes:
       - ./data/logs:/app/data/logs
       - ./data/database:/app/data/database
+
+    ollama:
+      image: ollama/ollama:latest
+      container_name: openclaw_ollama
+      ports:
+        - "11434:11434"
+      volumes:
+        - ollama_data:/root/.ollama
+      restart: unless-stopped
