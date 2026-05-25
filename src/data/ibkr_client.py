@@ -145,7 +145,19 @@ class IBKRClient:
             formatDate=1,
             keepUpToDate=True,
         )
+
         buffered_bars = self.data_buffer.setdefault(symbol, {}).setdefault(bar_size, [])
+        try:
+            fetched_count = len(bars)
+        except Exception:
+            fetched_count = len(buffered_bars)
+        self.logger.info(
+            "Confirmed fetch: %s fetched %d bars for timeframe=%s",
+            symbol,
+            fetched_count,
+            bar_size,
+        )
+
         for bar in bars:
             buffered_bars.append(
                 BarData(
