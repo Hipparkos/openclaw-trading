@@ -29,11 +29,11 @@ services:
       - ./data/logs:/app/data/logs
       - ./data/database:/app/data/database
 
-    ollama:
-      image: ollama/ollama:latest
-      container_name: openclaw_ollama
-      ports:
-        - "11434:11434"
-      volumes:
-        - ollama_data:/root/.ollama
-      restart: unless-stopped
+  ollama:
+    image: ollama/ollama:latest
+    container_name: openclaw_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
