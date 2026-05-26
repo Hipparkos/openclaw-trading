@@ -15,8 +15,7 @@ import yaml
 from dotenv import load_dotenv
 
 from data.ibkr_client import IBKRClient
-from data.news_client import MarketauxClient
-
+from data.news_client import NewsClient
 
 class ConfigurationError(Exception):
     pass
@@ -111,7 +110,7 @@ async def main() -> None:
 
     client = IBKRClient(settings)
     order_manager = OrderManager(client)
-    news_client = MarketauxClient()
+    news_client = NewsClient()
     shutdown_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     server: Optional[uvicorn.Server] = None
