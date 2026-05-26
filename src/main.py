@@ -161,11 +161,11 @@ async def main() -> None:
         logger.info("Testing Order Execution routing...")
         test_ticker = settings["tickers"][0] if settings["tickers"] else "AAPL"
         
-        async def _test_trade():
-            await asyncio.sleep(5)
-            await order_manager.place_market_order(test_ticker, "BUY", 1)
+        # async def _test_trade():
+        #     await asyncio.sleep(5)
+        #     await order_manager.place_market_order(test_ticker, "BUY", 1)
             
-        asyncio.create_task(_test_trade())
+        # asyncio.create_task(_test_trade())
 
         config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="warning")
         server = uvicorn.Server(config)
