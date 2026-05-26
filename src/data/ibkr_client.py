@@ -85,7 +85,7 @@ class IBKRClient:
         
         while True:
             for port in ports_to_try:
-                current_client_id = self.client_id + attempt
+                current_client_id = self.client_id
                 
                 try:
                     self.logger.info(f"Attempting API handshake at {self.host}:{port} with Client ID {current_client_id}...")
