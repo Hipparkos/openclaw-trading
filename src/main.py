@@ -135,30 +135,30 @@ async def main() -> None:
     try:
         logger.info("Starting...")
         async def _stream_news() -> None:
-            # Keep news polling off path.
+            logger.info("Starting news stream...")
+            
             while not shutdown_event.is_set():
                 for symbol in settings["tickers"]:
                     news_items = await news_client.fetch_latest_news(symbol)
+                    
                     for news_item in news_items:
                         logger.info(
-                            "NEWS %s | %s | sentiment=%s | %s | %s",
+                            "NEWS ALERT [%s] | AI Sentiment: %.2f | %s",
                             news_item.symbol,
-                            news_item.timestamp,
                             news_item.sentiment_score,
                             news_item.headline,
-                            news_item.url,
                         )
-
+                
                 try:
-                    await asyncio.wait_for(shutdown_event.wait(), timeout=300)
+                    await asyncio.wait_for(shutdown_event.wait(), timeout=60)
                 except asyncio.TimeoutError:
                     continue
 
         asyncio.create_task(_stream_news())
         await client.stream_market_data()
         
-        logger.info("Testing Order Execution routing...")
-        test_ticker = settings["tickers"][0] if settings["tickers"] else "AAPL"
+        # logger.info("Testing Order Execution routing...")
+        # test_ticker = settings["tickers"][0] if settings["tickers"] else "AAPL"
         
         # async def _test_trade():
         #     await asyncio.sleep(5)
