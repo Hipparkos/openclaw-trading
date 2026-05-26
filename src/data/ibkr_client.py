@@ -15,7 +15,7 @@ class IBKRClient:
         self.logger = logging.getLogger("IBKRClient")
         
         connection = settings.get("connection", {})
-        self.host = "ib_gateway"
+        self.host = "ib-gateway"
         self.port = 4002
         self.client_id = connection.get("clientId", 10)
         
@@ -27,7 +27,7 @@ class IBKRClient:
         self.data_buffer: Dict[str, Dict[str, List[BarData]]] = {}
 
         self.ib = IB()
-        self.max_retries = 10
+        self.max_retries = 30
         self.retry_delay = 7
         self._subscriptions: List[Any] = []
         
