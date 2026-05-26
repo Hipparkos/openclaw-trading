@@ -15,8 +15,9 @@ class IBKRClient:
         self.logger = logging.getLogger("IBKRClient")
         
         connection = settings.get("connection", {})
-        self.host = "ib-gateway"
-        self.port = 4002
+        # Allow host/port to be configured via settings (keeps previous defaults)
+        self.host = connection.get("host", "ib_gateway")
+        self.port = connection.get("port", 4002)
         self.client_id = connection.get("clientId", 10)
         
         # Modularized exchange and currency
@@ -148,7 +149,15 @@ class IBKRClient:
                     except Exception:
                         self.logger.exception("Strategy evaluation failed for %s", symbol)
 
-                asyncio.create_task(_evaluate_strategy())
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(_evaluate_strategy())
+                except RuntimeError:
+                    try:
+                        loop = asyncio.get_event_loop()
+                        loop.call_soon_threadsafe(asyncio.create_task, _evaluate_strategy())
+                    except Exception:
+                        self.logger.exception("Failed scheduling strategy task for %s", symbol)
 
         return on_update
 
