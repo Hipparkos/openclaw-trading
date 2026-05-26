@@ -5,6 +5,8 @@ from typing import Any, Callable, Dict, List
 from ib_insync import IB, Stock
 
 from data.data_models import BarData
+from strategy.indicators import IndicatorCalculator
+from strategy.logic import StrategyEngine
 
 
 class IBKRClient:
@@ -118,6 +120,24 @@ class IBKRClient:
             )
             self.data_buffer.setdefault(symbol, {}).setdefault(bar_size, []).append(normalized_bar)
             self.logger.info("Normalized bar update: %s", normalized_bar)
+
+            if bar_size == "5 mins" and has_new_bar:
+                async def _evaluate_strategy() -> None:
+                    try:
+                        bars_5m = list(self.data_buffer.get(symbol, {}).get("5 mins", []))
+                        if len(bars_5m) < 2:
+                            return
+
+                        indicator_calculator = IndicatorCalculator()
+                        df = indicator_calculator.calculate_all(bars_5m)
+
+                        strategy_engine = StrategyEngine()
+                        signal = strategy_engine.evaluate_signals(df)
+                        self.logger.info("Strategy signal: %s", signal)
+                    except Exception:
+                        self.logger.exception("Strategy evaluation failed for %s", symbol)
+
+                asyncio.create_task(_evaluate_strategy())
 
         return on_update
 

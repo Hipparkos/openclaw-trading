@@ -7,6 +7,7 @@ from data.data_models import BarData
 
 
 class IndicatorCalculator:
+    # Build indicator dataframe.
     def calculate_all(self, bars: list[BarData]) -> pd.DataFrame:
         if not bars:
             return pd.DataFrame()
@@ -38,6 +39,10 @@ class IndicatorCalculator:
         macd = ta.macd(df["close"], fast=12, slow=26, signal=9)
         if macd is not None:
             df = df.join(macd)
+
+        macd_620 = ta.macd(df["close"], fast=6, slow=20, signal=9)
+        if macd_620 is not None:
+            df = df.join(macd_620)
 
         bbands = ta.bbands(df["close"], length=20, std=2)
         if bbands is not None:
