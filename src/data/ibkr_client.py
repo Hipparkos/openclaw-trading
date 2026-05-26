@@ -81,11 +81,11 @@ class IBKRClient:
 # Connect async - reliable connect with retries and port sweeping
     async def connect(self) -> None:
         attempt = 0
-        ports_to_try = [4002]
+        ports_to_try = [4004]
         
         while True:
             for port in ports_to_try:
-                current_client_id = self.client_id
+                current_client_id = self.client_id + attempt
                 
                 try:
                     self.logger.info(f"Attempting API handshake at {self.host}:{port} with Client ID {current_client_id}...")

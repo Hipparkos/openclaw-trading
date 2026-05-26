@@ -13,7 +13,7 @@ services:
       IBC_AcceptIncomingConnectionAction: 'accept'
       OLLAMA_HOST: http://ollama:11434
     ports:
-      - "4002:4002"
+      - "4004:4004"
 
   openclaw:
     build: .
@@ -37,6 +37,6 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     restart: unless-stopped
-    
+
 volumes:
   ollama_data:
