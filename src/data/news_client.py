@@ -62,6 +62,12 @@ class NewsClient:
         normalized_news: list[NewsData] = []
         if not news_items:
             return normalized_news
+        
+        if not news_items:
+            self.logger.warning(f"Yahoo Finance returned ZERO articles for {symbol}.")
+            return normalized_news
+
+        self.logger.info(f"Found {len(news_items)} total articles for {symbol} on Yahoo.")
 
         for item in news_items[:3]:
             url = item.get("link", "")
