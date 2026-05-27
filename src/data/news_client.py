@@ -71,9 +71,6 @@ class NewsClient:
 
         for item in news_items[:3]:
             url = item.get("link", "")
-            
-            if not url or url in self.seen_urls:
-                continue
                 
             self.seen_urls.add(url)
             headline = item.get("title", "")
