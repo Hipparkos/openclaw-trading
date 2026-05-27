@@ -131,7 +131,17 @@ class IBKRClient:
                 volume=float(bar.volume),
             )
             self.data_buffer.setdefault(symbol, {}).setdefault(bar_size, []).append(normalized_bar)
-            self.logger.info("Normalized bar update: %s", normalized_bar)
+            
+            self.logger.info(
+                "%s [%s] | O: %s | H: %s | L: %s | C: %s | V: %s", 
+                symbol, 
+                bar_size, 
+                normalized_bar.open, 
+                normalized_bar.high, 
+                normalized_bar.low, 
+                normalized_bar.close, 
+                normalized_bar.volume
+            )
 
             if bar_size == "5 mins" and has_new_bar:
                 async def _evaluate_strategy() -> None:
