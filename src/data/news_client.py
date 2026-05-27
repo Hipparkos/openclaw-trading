@@ -82,6 +82,10 @@ class NewsClient:
             self.logger.info(f"Asking Ollama to score headline: '{headline}'")
             sentiment_score = await self.get_ollama_sentiment(headline)
 
+            self.logger.info(
+                f"Title: {headline} | URL: {url} | Sentiment: {sentiment_score}"
+            )
+
             # Convert Yahoo's unix timestamp to standard ISO
             pub_time = item.get("providerPublishTime")
             if pub_time:
