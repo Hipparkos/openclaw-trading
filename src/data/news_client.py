@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -12,10 +13,10 @@ from data.data_models import NewsData
 class NewsClient:
     def __init__(self) -> None:
         self.logger = logging.getLogger("NewsClient")
-        self.seen_urls = set()
 
     async def get_ollama_sentiment(self, headline: str) -> float:
         url = "http://openclaw_ollama:11434/api/generate"
+        self.logger.info("Requesting Ollama sentiment for headline: %s", headline)
         
         system_prompt = (
             "You are a quantitative financial sentiment analyzer. "
@@ -33,20 +34,26 @@ class NewsClient:
         }
 
         try:
-            timeout = aiohttp.ClientTimeout(total=15)
+            timeout = aiohttp.ClientTimeout(total=10, connect=5, sock_read=5)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(url, json=payload) as response:
                     response.raise_for_status()
-                    data = await response.json()
+                    data = await response.json(content_type=None)
                     
-                    raw_response = data.get("response", "").strip()
+                    raw_response = str(data.get("response", "")).strip()
                     
-                    try:
-                        return float(raw_response)
-                    except ValueError:
-                        self.logger.error(f"Ollama returned non-float text: {raw_response}")
-                        return 0.0 
+                    match = re.search(r"-?\d+(?:\.\d+)?", raw_response)
+                    if match:
+                        sentiment = float(match.group(0))
+                        self.logger.info("Ollama sentiment score: %s", sentiment)
+                        return sentiment
+
+                    self.logger.error("Ollama returned non-numeric text: %s", raw_response)
+                    return 0.0 
                         
+        except asyncio.TimeoutError:
+            self.logger.error("Timed out waiting for Ollama sentiment response.")
+            return 0.0
         except Exception as e:
             self.logger.error(f"Failed to reach Ollama: {e}")
             return 0.0
@@ -71,8 +78,6 @@ class NewsClient:
 
         for item in news_items[:3]:
             url = item.get("link", "")
-                
-            self.seen_urls.add(url)
             headline = item.get("title", "")
             
             # Feed the headline to local AI
