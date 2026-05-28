@@ -16,6 +16,17 @@ class NewsClient:
 
     @staticmethod
     def _first_nonempty_text(item: dict[str, Any], keys: tuple[str, ...]) -> str:
+        nested_content = item.get("content")
+        if isinstance(nested_content, dict):
+            for key in keys:
+                value = nested_content.get(key, "")
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+                if value is not None and not isinstance(value, (dict, list)):
+                    text = str(value).strip()
+                    if text:
+                        return text
+
         for key in keys:
             value = item.get(key, "")
             if isinstance(value, str) and value.strip():
@@ -31,6 +42,20 @@ class NewsClient:
         url = item.get("link", "")
         if isinstance(url, str) and url.strip():
             return url.strip()
+
+        nested_content = item.get("content")
+        if isinstance(nested_content, dict):
+            nested_url = nested_content.get("canonicalUrl", {})
+            if isinstance(nested_url, dict):
+                url = nested_url.get("url", "")
+                if isinstance(url, str) and url.strip():
+                    return url.strip()
+
+            nested_click_through = nested_content.get("clickThroughUrl", {})
+            if isinstance(nested_click_through, dict):
+                url = nested_click_through.get("url", "")
+                if isinstance(url, str) and url.strip():
+                    return url.strip()
 
         canonical_url = item.get("canonicalUrl", {})
         if isinstance(canonical_url, dict):
@@ -116,7 +141,8 @@ class NewsClient:
             )
 
             if not headline:
-                self.logger.warning("Skipping Yahoo news item with no headline: %s", item)
+                item_id = item.get("id", "unknown")
+                self.logger.warning("Skipping Yahoo news item without headline (id=%s)", item_id)
                 continue
             
             # Feed the headline to local AI
