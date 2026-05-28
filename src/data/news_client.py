@@ -14,6 +14,38 @@ class NewsClient:
     def __init__(self) -> None:
         self.logger = logging.getLogger("NewsClient")
 
+    @staticmethod
+    def _first_nonempty_text(item: dict[str, Any], keys: tuple[str, ...]) -> str:
+        for key in keys:
+            value = item.get(key, "")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if value is not None and not isinstance(value, (dict, list)):
+                text = str(value).strip()
+                if text:
+                    return text
+        return ""
+
+    @staticmethod
+    def _extract_url(item: dict[str, Any]) -> str:
+        url = item.get("link", "")
+        if isinstance(url, str) and url.strip():
+            return url.strip()
+
+        canonical_url = item.get("canonicalUrl", {})
+        if isinstance(canonical_url, dict):
+            url = canonical_url.get("url", "")
+            if isinstance(url, str) and url.strip():
+                return url.strip()
+
+        click_through = item.get("clickThroughUrl", {})
+        if isinstance(click_through, dict):
+            url = click_through.get("url", "")
+            if isinstance(url, str) and url.strip():
+                return url.strip()
+
+        return ""
+
     async def get_ollama_sentiment(self, headline: str) -> float:
         url = "http://openclaw_ollama:11434/api/generate"
         self.logger.info("Requesting Ollama sentiment for headline: %s", headline)
@@ -77,8 +109,15 @@ class NewsClient:
         self.logger.info(f"Found {len(news_items)} total articles for {symbol} on Yahoo.")
 
         for item in news_items[:3]:
-            url = item.get("link", "")
-            headline = item.get("title", "")
+            url = self._extract_url(item)
+            headline = self._first_nonempty_text(
+                item,
+                ("title", "headline", "summary", "description", "content"),
+            )
+
+            if not headline:
+                self.logger.warning("Skipping Yahoo news item with no headline: %s", item)
+                continue
             
             # Feed the headline to local AI
             self.logger.info(f"Asking Ollama to score headline: '{headline}'")
