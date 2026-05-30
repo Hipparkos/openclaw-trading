@@ -16,6 +16,8 @@ from dotenv import load_dotenv
 
 from data.ibkr_client import IBKRClient
 from data.news_client import NewsClient
+from strategy.indicators import IndicatorCalculator
+from strategy.logic import StrategyEngine
 
 class ConfigurationError(Exception):
     pass
@@ -134,12 +136,43 @@ async def main() -> None:
 
     try:
         logger.info("Starting...")
+
         async def _stream_news() -> None:
             logger.info("Starting news stream...")
+
+            async def _build_technical_context(symbol: str) -> str:
+                bars_5m = list(client.data_buffer.get(symbol, {}).get("5 mins", []))
+                if len(bars_5m) < 2:
+                    return "Insufficient 5-minute market data yet."
+
+                indicator_calculator = IndicatorCalculator()
+                df = await asyncio.to_thread(indicator_calculator.calculate_all, bars_5m)
+                if df.empty:
+                    return "Technical dataframe is empty."
+
+                strategy_engine = StrategyEngine()
+                signal = await asyncio.to_thread(strategy_engine.evaluate_signals, df)
+
+                latest_row = df.iloc[-1]
+                close_value = latest_row.get("close")
+                rsi_value = latest_row.get("rsi_14")
+                macd_value = latest_row.get("MACD_6_20_9")
+                macd_signal_value = latest_row.get("MACDs_6_20_9")
+
+                return (
+                    f"5m bars: {len(bars_5m)} | "
+                    f"close: {close_value:.2f} | "
+                    f"rsi_14: {rsi_value:.2f} | "
+                    f"macd_6_20_9: {macd_value:.4f} | "
+                    f"macd_signal_6_20_9: {macd_signal_value:.4f} | "
+                    f"strategy_signal: {signal.get('signal')} | "
+                    f"setup_type: {signal.get('setup_type') or 'None'}"
+                )
             
             while not shutdown_event.is_set():
                 for symbol in settings["tickers"]:
-                    news_items = await news_client.fetch_latest_news(symbol)
+                    technical_context = await _build_technical_context(symbol)
+                    news_items = await news_client.fetch_latest_news(symbol, technical_context=technical_context)
                     
                     for news_item in news_items:
                         logger.info(
