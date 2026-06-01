@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   ib-gateway:
@@ -9,8 +9,8 @@ services:
       TWS_USERID: ${IB_USER}
       TWS_PASSWORD: ${IB_PASSWORD}
       TRADING_MODE: paper
-      READ_ONLY_API: 'no'
-      IBC_AcceptIncomingConnectionAction: 'accept'
+      READ_ONLY_API: "no"
+      IBC_AcceptIncomingConnectionAction: "accept"
       OLLAMA_HOST: http://ollama:11434
     ports:
       - "4004:4004"
@@ -23,9 +23,6 @@ services:
       - ib-gateway
     ports:
       - "8000:8000"
-    environment:
-      - DISCORD_TOKEN=${DISCORD_TOKEN}
-      - DISCORD_CHANNEL_ID=${DISCORD_CHANNEL_ID}
     env_file:
       - .env
     volumes:
