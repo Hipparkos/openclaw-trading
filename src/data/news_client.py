@@ -111,8 +111,7 @@ class NewsClient:
         technical_context: str,
         headline: str,
     ) -> dict[str, Any]:
-        # Switched to the standard chat API endpoint
-        url = "http://localhost:11434/api/chat"
+        url = "http://openclaw_ollama:11434/api/chat"
         self.logger.info("Requesting OpenClaw pattern evaluation for %s", ticker)
 
         system_prompt = (
