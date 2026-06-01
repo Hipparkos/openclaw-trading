@@ -1,6 +1,7 @@
 import contextlib
 import asyncio
 import logging
+import os
 import signal
 import sys
 from logging.handlers import RotatingFileHandler
@@ -16,6 +17,7 @@ from dotenv import load_dotenv
 
 from data.ibkr_client import IBKRClient
 from data.news_client import NewsClient
+from discord_bot.controller import OpenClawDiscord
 from strategy.indicators import IndicatorCalculator
 from strategy.logic import StrategyEngine
 
@@ -113,6 +115,7 @@ async def main() -> None:
     client = IBKRClient(settings)
     order_manager = OrderManager(client)
     news_client = NewsClient()
+    discord_ui = OpenClawDiscord(order_manager)
     shutdown_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     server: Optional[uvicorn.Server] = None
@@ -136,6 +139,7 @@ async def main() -> None:
 
     try:
         logger.info("Starting...")
+        asyncio.create_task(discord_ui.start(os.getenv("DISCORD_TOKEN")))
 
         async def _stream_news() -> None:
             logger.info("Starting news stream...")
@@ -181,6 +185,19 @@ async def main() -> None:
                             news_item.sentiment_score,
                             news_item.headline,
                         )
+
+                        prediction: Optional[str] = None
+                        if news_item.sentiment_score >= 0.5:
+                            prediction = "UP"
+                        elif news_item.sentiment_score <= -0.5:
+                            prediction = "DOWN"
+
+                        if prediction is not None:
+                            await discord_ui.send_trade_signal(
+                                symbol=news_item.symbol,
+                                market_story=technical_context,
+                                llm_prediction=prediction,
+                            )
                 
                 try:
                     await asyncio.wait_for(shutdown_event.wait(), timeout=60)
@@ -216,6 +233,8 @@ async def main() -> None:
         if server_task is not None:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await asyncio.wait_for(server_task, timeout=5)
+        with contextlib.suppress(Exception):
+            await discord_ui.close()
         order_manager.close() # Clean up order event listeners
         client.disconnect()
 
