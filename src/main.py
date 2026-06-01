@@ -116,6 +116,14 @@ async def main() -> None:
     order_manager = OrderManager(client)
     news_client = NewsClient()
     discord_ui = OpenClawDiscord(order_manager)
+    discord_token = os.getenv("DISCORD_TOKEN")
+
+    # 3. Safety Guard for the Token
+    if not discord_token:
+        logger.error("DISCORD_TOKEN is missing from the environment!")
+    else:
+        logger.info("Discord token loaded securely. Starting Discord UI...")
+        asyncio.create_task(discord_ui.start(discord_token))
     shutdown_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     server: Optional[uvicorn.Server] = None
