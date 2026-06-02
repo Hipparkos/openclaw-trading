@@ -185,24 +185,32 @@ async def main() -> None:
                     
                     for news_item in news_items:
                         logger.info(
-                            "NEWS ALERT [%s] | AI Sentiment: %.2f | %s",
-                            news_item.symbol,
-                            news_item.sentiment_score,
+                            # "NEWS ALERT [%s] | AI Sentiment: %.2f | %s",
+                            # news_item.symbol,
+                            # news_item.sentiment_score,
+                            "Discord test: %s",
+
                             news_item.headline,
                         )
 
-                        prediction: Optional[str] = None
-                        if news_item.sentiment_score >= 0.5:
-                            prediction = "UP"
-                        elif news_item.sentiment_score <= -0.5:
-                            prediction = "DOWN"
+                        # prediction: Optional[str] = None
+                        # if news_item.sentiment_score >= 0.5:
+                        #     prediction = "UP"
+                        # elif news_item.sentiment_score <= -0.5:
+                        #     prediction = "DOWN"
 
-                        if prediction is not None:
-                            await discord_ui.send_trade_signal(
-                                symbol=news_item.symbol,
-                                market_story=technical_context,
-                                llm_prediction=prediction,
-                            )
+                        # if prediction is not None:
+                        #     await discord_ui.send_trade_signal(
+                        #         symbol=news_item.symbol,
+                        #         market_story=technical_context,
+                        #         llm_prediction=prediction,
+                        #     )
+                        await discord_ui.send_trade_signal(
+                            symbol=news_item.symbol,
+                            market_story=technical_context,
+                            llm_prediction="UP",
+                        )
+                        break
                 
                 try:
                     await asyncio.wait_for(shutdown_event.wait(), timeout=60)
