@@ -160,23 +160,7 @@ async def main() -> None:
                     return "Technical dataframe is empty."
 
                 strategy_engine = StrategyEngine()
-                signal = await asyncio.to_thread(strategy_engine.evaluate_signals, df)
-
-                latest_row = df.iloc[-1]
-                close_value = latest_row.get("close")
-                rsi_value = latest_row.get("rsi_14")
-                macd_value = latest_row.get("MACD_6_20_9")
-                macd_signal_value = latest_row.get("MACDs_6_20_9")
-
-                return (
-                    f"5m bars: {len(bars_5m)} | "
-                    f"close: {close_value:.2f} | "
-                    f"rsi_14: {rsi_value:.2f} | "
-                    f"macd_6_20_9: {macd_value:.4f} | "
-                    f"macd_signal_6_20_9: {macd_signal_value:.4f} | "
-                    f"strategy_signal: {signal.get('signal')} | "
-                    f"setup_type: {signal.get('setup_type') or 'None'}"
-                )
+                return await asyncio.to_thread(strategy_engine.evaluate_signals, df)
             
             while not shutdown_event.is_set():
                 for symbol in settings["tickers"]:
@@ -191,10 +175,14 @@ async def main() -> None:
                             news_item.headline,
                         )
 
+                        sentiment_score = news_item.sentiment_score
+                        if sentiment_score is None or sentiment_score != sentiment_score or sentiment_score == 0.0:
+                            continue
+
                         await discord_ui.send_trade_signal(
                             symbol=news_item.symbol,
                             market_story=technical_context,
-                            llm_prediction="UP",
+                            llm_prediction="UP" if sentiment_score > 0 else "DOWN",
                         )
                         break
                 
