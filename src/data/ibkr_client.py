@@ -78,7 +78,6 @@ class IBKRClient:
                 self.logger.error(f"Runtime reconnection failed: {e}")
 
     # Connect async - reliable connect with retries
-# Connect async - reliable connect with retries and port sweeping
     async def connect(self) -> None:
         attempt = 0
         ports_to_try = [4004]

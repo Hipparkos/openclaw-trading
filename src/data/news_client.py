@@ -227,7 +227,6 @@ class NewsClient:
         return ""
 
     async def get_ollama_sentiment(self, headline: str, session: aiohttp.ClientSession = None) -> float:
-        """Helper updated to optionally receive an external connection session."""
         if session:
             prediction = await self.get_openclaw_prediction(
                 session=session, ticker="UNKNOWN", technical_context="", headline=headline

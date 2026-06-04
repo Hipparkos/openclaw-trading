@@ -31,9 +31,6 @@ class TradeApprovalView(discord.ui.View):
 
 
 class OpenClawDiscord(commands.Bot):
-    """
-    Lightweight Discord UI component for OpenClaw live tracking.
-    """
     def __init__(self, order_manager):
         intents = discord.Intents.default()
         intents.message_content = True  
