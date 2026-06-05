@@ -144,7 +144,7 @@ class NewsClient:
         )
 
         payload = {
-            "model": "llama3.2",
+            "model": "openclaw",
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt}
