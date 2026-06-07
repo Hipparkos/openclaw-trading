@@ -184,7 +184,13 @@ async def main() -> None:
                 outcome_label = "Win" if pct_change >= 0.0 else "Loss"
                 return f"{pct_change:+.2f}% ({outcome_label})"
 
-            async def _route_trade(symbol: str, signal_direction: str, technical_context: str, current_price: float) -> None:
+            async def _route_trade(
+                symbol: str,
+                signal_direction: str,
+                technical_context: str,
+                current_price: float,
+                confidence: float,
+            ) -> None:
                 now = datetime.now(timezone.utc)
                 holding_quantity = order_manager.get_position(symbol)
                 is_holding = holding_quantity != 0.0
@@ -222,6 +228,12 @@ async def main() -> None:
                         "entry_time": now,
                         "quantity": 10,
                     }
+                    await discord_ui.send_execution_alert(
+                        symbol=symbol,
+                        action="BUY",
+                        confidence=confidence,
+                        market_story=technical_context,
+                    )
                     logger.info("BUY executed for %s with fixed quantity 10.", symbol)
                     return
 
@@ -243,6 +255,13 @@ async def main() -> None:
                             prediction=str(trade_memory.get("prediction", signal_direction)),
                             outcome=outcome,
                         )
+
+                    await discord_ui.send_execution_alert(
+                        symbol=symbol,
+                        action="SELL",
+                        confidence=confidence,
+                        market_story=technical_context,
+                    )
 
                     logger.info("SELL executed for %s with fixed quantity 10.", symbol)
                     return
@@ -271,19 +290,18 @@ async def main() -> None:
                         if sentiment_score is None or sentiment_score != sentiment_score or sentiment_score == 0.0:
                             continue
 
-                        signal_direction = "BULLISH" if sentiment_score > 0 else "BEARISH"
+                        confidence = abs(sentiment_score)
+                        if confidence < 0.5:
+                            continue
 
-                        await discord_ui.send_trade_signal(
-                            symbol=news_item.symbol,
-                            market_story=technical_context,
-                            llm_prediction="UP" if signal_direction == "BULLISH" else "DOWN",
-                        )
+                        signal_direction = "BULLISH" if sentiment_score > 0 else "BEARISH"
 
                         await _route_trade(
                             symbol=news_item.symbol,
                             signal_direction=signal_direction,
                             technical_context=technical_context,
                             current_price=current_price,
+                            confidence=confidence,
                         )
                         break
                 
