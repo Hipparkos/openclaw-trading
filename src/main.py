@@ -4,6 +4,7 @@ import logging
 import os
 import signal
 import sys
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from execution.order_manager import OrderManager
 from pathlib import Path
@@ -121,6 +122,9 @@ async def main() -> None:
     loop = asyncio.get_running_loop()
     server: Optional[uvicorn.Server] = None
     server_task: Optional[asyncio.Task[Any]] = None
+    last_buy_time: Dict[str, datetime] = {}
+    last_sell_time: Dict[str, datetime] = {}
+    open_trade_memory: Dict[str, Dict[str, Any]] = {}
 
     app.state.client = client
     app.state.settings = settings
@@ -149,22 +153,110 @@ async def main() -> None:
         async def _stream_news() -> None:
             logger.info("Starting news stream...")
 
-            async def _build_technical_context(symbol: str) -> str:
+            async def _build_trade_snapshot(symbol: str) -> tuple[str, float]:
                 bars_5m = list(client.data_buffer.get(symbol, {}).get("5 mins", []))
                 if len(bars_5m) < 2:
-                    return "Insufficient 5-minute market data yet."
+                    return "Insufficient 5-minute market data yet.", 0.0
 
                 indicator_calculator = IndicatorCalculator()
                 df = await asyncio.to_thread(indicator_calculator.calculate_all, bars_5m)
                 if df.empty:
-                    return "Technical dataframe is empty."
+                    return "Technical dataframe is empty.", 0.0
 
                 strategy_engine = StrategyEngine()
-                return await asyncio.to_thread(strategy_engine.evaluate_signals, df)
+                technical_context = await asyncio.to_thread(strategy_engine.evaluate_signals, df)
+
+                current_price = 0.0
+                latest_close = df.iloc[-1].get("close")
+                if latest_close is not None and latest_close == latest_close:
+                    try:
+                        current_price = float(latest_close)
+                    except (TypeError, ValueError):
+                        current_price = 0.0
+
+                return technical_context, current_price
+
+            def _trade_outcome(entry_price: float, exit_price: float) -> str:
+                if entry_price <= 0.0 or exit_price <= 0.0:
+                    return "UNKNOWN"
+
+                pct_change = ((exit_price - entry_price) / entry_price) * 100.0
+                outcome_label = "Win" if pct_change >= 0.0 else "Loss"
+                return f"{pct_change:+.2f}% ({outcome_label})"
+
+            async def _route_trade(symbol: str, signal_direction: str, technical_context: str, current_price: float) -> None:
+                now = datetime.now(timezone.utc)
+                holding_quantity = order_manager.get_position(symbol)
+                is_holding = holding_quantity != 0.0
+
+                if signal_direction == "BULLISH" and not is_holding:
+                    last_buy = last_buy_time.get(symbol)
+                    last_sell = last_sell_time.get(symbol)
+
+                    if last_buy and now - last_buy < timedelta(minutes=15):
+                        logger.info("Skipping BUY for %s due to buy cooldown.", symbol)
+                        return
+
+                    if last_sell and now - last_sell < timedelta(minutes=15):
+                        logger.info("Skipping BUY for %s due to recent sell cooldown.", symbol)
+                        return
+
+                    account_equity = order_manager.get_account_equity()
+                    target_capital = account_equity * 0.015 if account_equity > 0.0 else 0.0
+                    calculated_shares = (target_capital / current_price) if current_price > 0.0 else 0.0
+                    logger.info(
+                        "Sizing check | %s | equity=%.2f | target_capital=%.2f | current_price=%.2f | calculated_shares=%.2f | executed_quantity=10",
+                        symbol,
+                        account_equity,
+                        target_capital,
+                        current_price,
+                        calculated_shares,
+                    )
+
+                    await order_manager.execute_trade(symbol, "BUY", 10)
+                    last_buy_time[symbol] = now
+                    open_trade_memory[symbol] = {
+                        "technical_context": technical_context,
+                        "prediction": signal_direction,
+                        "entry_price": current_price,
+                        "entry_time": now,
+                        "quantity": 10,
+                    }
+                    logger.info("BUY executed for %s with fixed quantity 10.", symbol)
+                    return
+
+                if signal_direction == "BEARISH" and is_holding:
+                    last_buy = last_buy_time.get(symbol)
+                    if last_buy and now - last_buy < timedelta(minutes=5):
+                        logger.info("Skipping SELL for %s because the minimum hold time has not elapsed.", symbol)
+                        return
+
+                    await order_manager.execute_trade(symbol, "SELL", 10)
+                    last_sell_time[symbol] = now
+
+                    trade_memory = open_trade_memory.pop(symbol, None)
+                    if trade_memory:
+                        outcome = _trade_outcome(float(trade_memory.get("entry_price", 0.0)), current_price)
+                        news_client.record_trade_memory(
+                            symbol=symbol,
+                            technical_context=str(trade_memory.get("technical_context", technical_context)),
+                            prediction=str(trade_memory.get("prediction", signal_direction)),
+                            outcome=outcome,
+                        )
+
+                    logger.info("SELL executed for %s with fixed quantity 10.", symbol)
+                    return
+
+                logger.info(
+                    "No autonomous trade executed for %s | holding=%s | signal=%s",
+                    symbol,
+                    is_holding,
+                    signal_direction,
+                )
             
             while not shutdown_event.is_set():
                 for symbol in settings["tickers"]:
-                    technical_context = await _build_technical_context(symbol)
+                    technical_context, current_price = await _build_trade_snapshot(symbol)
                     news_items = await news_client.fetch_latest_news(symbol, technical_context=technical_context)
                     
                     for news_item in news_items:
@@ -179,10 +271,19 @@ async def main() -> None:
                         if sentiment_score is None or sentiment_score != sentiment_score or sentiment_score == 0.0:
                             continue
 
+                        signal_direction = "BULLISH" if sentiment_score > 0 else "BEARISH"
+
                         await discord_ui.send_trade_signal(
                             symbol=news_item.symbol,
                             market_story=technical_context,
-                            llm_prediction="UP" if sentiment_score > 0 else "DOWN",
+                            llm_prediction="UP" if signal_direction == "BULLISH" else "DOWN",
+                        )
+
+                        await _route_trade(
+                            symbol=news_item.symbol,
+                            signal_direction=signal_direction,
+                            technical_context=technical_context,
+                            current_price=current_price,
                         )
                         break
                 
@@ -193,15 +294,6 @@ async def main() -> None:
 
         asyncio.create_task(_stream_news())
         await client.stream_market_data()
-        
-        # logger.info("Testing Order Execution routing...")
-        # test_ticker = settings["tickers"][0] if settings["tickers"] else "AAPL"
-        
-        # async def _test_trade():
-        #     await asyncio.sleep(5)
-        #     await order_manager.place_market_order(test_ticker, "BUY", 1)
-            
-        # asyncio.create_task(_test_trade())
 
         config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="warning")
         server = uvicorn.Server(config)

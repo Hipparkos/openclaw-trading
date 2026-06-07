@@ -73,10 +73,38 @@ class OrderManager:
             self.logger.exception("Failed to place order for %s: %s", symbol, exc)
             raise
 
+    def get_position(self, symbol: str) -> float:
+        for position in self.ib.positions():
+            if getattr(position.contract, "symbol", "") == symbol:
+                try:
+                    return float(position.position)
+                except (TypeError, ValueError):
+                    return 0.0
+        return 0.0
+
+    def get_account_equity(self) -> float:
+        try:
+            for item in self.ib.accountSummary():
+                if getattr(item, "tag", "") != "NetLiquidation":
+                    continue
+
+                value = getattr(item, "value", None)
+                if value is None:
+                    continue
+
+                return float(str(value).replace(",", ""))
+        except Exception as exc:
+            self.logger.warning("Failed to fetch account equity: %s", exc)
+
+        return 0.0
+
     # Convenience market order - quick market submit
     async def place_market_order(self, symbol: str, action: str, quantity: float) -> Any:
         order = MarketOrder(action.upper(), quantity, tif="DAY")
         return await self._place_order(symbol, order)
+
+    async def execute_trade(self, symbol: str, side: str, quantity: float = 10) -> Any:
+        return await self.place_market_order(symbol, side, quantity)
 
     # Convenience limit order - submit with cap price
     async def place_limit_order(self, symbol: str, action: str, quantity: float, price: float) -> Any:

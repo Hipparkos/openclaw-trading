@@ -2,7 +2,10 @@ import asyncio
 import json
 import logging
 import re
+import sqlite3
+import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -14,6 +17,104 @@ from data.data_models import NewsData
 class NewsClient:
     def __init__(self) -> None:
         self.logger = logging.getLogger("NewsClient")
+        self.memory_db_path = Path(__file__).resolve().parents[2] / "data" / "database" / "trade_memory.db"
+        self.memory_db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._memory_db_lock = threading.Lock()
+        self._initialize_memory_store()
+
+    def _initialize_memory_store(self) -> None:
+        with self._memory_connection() as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trade_memory (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    technical_context TEXT NOT NULL,
+                    prediction TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trade_memory_symbol_created ON trade_memory(symbol, created_at DESC)"
+            )
+
+    def _memory_connection(self) -> sqlite3.Connection:
+        return sqlite3.connect(self.memory_db_path)
+
+    @staticmethod
+    def _tokenize(text: str) -> set[str]:
+        return {token for token in re.findall(r"[a-z0-9_]+", text.lower()) if len(token) > 2}
+
+    @staticmethod
+    def _truncate_text(text: str, limit: int = 220) -> str:
+        cleaned = " ".join(text.split())
+        if len(cleaned) <= limit:
+            return cleaned
+        return f"{cleaned[: limit - 3]}..."
+
+    def record_trade_memory(self, symbol: str, technical_context: str, prediction: str, outcome: str) -> None:
+        with self._memory_db_lock, self._memory_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO trade_memory (symbol, technical_context, prediction, outcome, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    symbol,
+                    technical_context,
+                    prediction,
+                    outcome,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+    def _fetch_live_memory_injection(self, symbol: str, technical_context: str, headline: str) -> str:
+        with self._memory_db_lock, self._memory_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT technical_context, prediction, outcome, created_at
+                FROM trade_memory
+                WHERE symbol = ?
+                ORDER BY created_at DESC
+                LIMIT 20
+                """,
+                (symbol,),
+            ).fetchall()
+
+        if not rows:
+            return ""
+
+        current_tokens = self._tokenize(f"{technical_context} {headline}")
+        scored_rows: list[tuple[int, tuple[Any, ...]]] = []
+        for row in rows:
+            row_tokens = self._tokenize(str(row[0]))
+            overlap = len(current_tokens & row_tokens) if current_tokens and row_tokens else 0
+            scored_rows.append((overlap, row))
+
+        scored_rows.sort(key=lambda item: (item[0], str(item[1][3])), reverse=True)
+
+        selected_rows = [row for score, row in scored_rows if score > 0][:3]
+        if not selected_rows:
+            selected_rows = [row for _, row in scored_rows[:3]]
+
+        if not selected_rows:
+            return ""
+
+        memory_lines = ["LIVE MEMORY INJECTION:"]
+        for technical_context_row, prediction, outcome, created_at in selected_rows:
+            memory_lines.append(
+                "- Recent similar setup on {symbol} at {created_at}: predicted {prediction}, outcome {outcome}. Context: {context}".format(
+                    symbol=symbol,
+                    created_at=created_at,
+                    prediction=prediction,
+                    outcome=outcome,
+                    context=self._truncate_text(str(technical_context_row)),
+                )
+            )
+
+        return "\n".join(memory_lines)
 
     @staticmethod
     def _neutral_openclaw_prediction() -> dict[str, Any]:
@@ -114,6 +215,13 @@ class NewsClient:
         url = "http://openclaw_ollama:11434/api/chat"
         self.logger.info("Requesting OpenClaw pattern evaluation for %s", ticker)
 
+        memory_injection = await asyncio.to_thread(
+            self._fetch_live_memory_injection,
+            ticker,
+            technical_context,
+            headline,
+        )
+
         system_prompt = (
             "You are an elite quantitative trading intelligence engine. "
             "Your sole function is to synthesize technical market structures and fundamental catalysts (news) "
@@ -136,18 +244,21 @@ class NewsClient:
             "}"
         )
 
-        prompt = (
+        user_prompt = (
             f"Ticker: {ticker}\n"
             f"Technical Setup: {technical_context or 'Not provided'}\n"
             f"Headline Catalyst: {headline}\n\n"
             "Return the JSON evaluation now."
         )
 
+        if memory_injection:
+            user_prompt = f"{user_prompt}\n\n{memory_injection}"
+
         payload = {
             "model": "openclaw",
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
+                {"role": "user", "content": user_prompt}
             ],
             "stream": False,
             "options": {
