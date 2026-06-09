@@ -45,15 +45,16 @@ class TradingCommands(commands.Cog):
     async def positions(self, ctx):
         try:
             active_positions = []
-            for position in self.order_manager.ib.positions():
-                shares = float(getattr(position, "position", 0.0) or 0.0)
+            for item in self.order_manager.ib.portfolio():
+                symbol = getattr(item.contract, "symbol", "UNKNOWN")
+                shares = float(getattr(item, "position", 0.0) or 0.0)
                 if shares == 0.0:
                     continue
 
-                symbol = getattr(position.contract, "symbol", "UNKNOWN")
-                average_cost = getattr(position, "avgCost", 0.0)
+                average_cost = getattr(item, "averageCost", 0.0)
+                market_value = getattr(item, "marketValue", 0.0)
                 active_positions.append(
-                    f"**{symbol}** | Shares: {shares:,.2f} | Average Cost: {self._format_currency(average_cost)}"
+                    f"{symbol} | Shares: {shares:,.0f} | Avg Cost: {self._format_currency(average_cost)} | Market Value: {self._format_currency(market_value)}"
                 )
 
             embed = discord.Embed(title="Active Positions", color=0x2F3136)

@@ -74,7 +74,7 @@ class OrderManager:
             raise
 
     def get_position(self, symbol: str) -> float:
-        for position in self.ib.positions():
+        for position in self.ib.portfolio():
             if getattr(position.contract, "symbol", "") == symbol:
                 try:
                     return float(position.position)
@@ -84,7 +84,7 @@ class OrderManager:
 
     def get_account_equity(self) -> float:
         try:
-            for item in self.ib.accountSummary():
+            for item in self.ib.accountValues():
                 if getattr(item, "tag", "") != "NetLiquidation":
                     continue
 

@@ -97,6 +97,7 @@ class IBKRClient:
                     )
                     self.logger.info(f"SUCCESS: Connected to IBKR at {self.host}:{port}!")
                     self.port = port
+                    self.ib.reqAccountUpdates(True, "")
                     return
                 except Exception as exc:
                     self.logger.debug(f"Port {port} rejected handshake: {exc}")
