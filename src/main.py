@@ -192,12 +192,13 @@ async def main() -> None:
                 confidence: float,
             ) -> None:
                 now = datetime.now(timezone.utc)
+                symbol_key = symbol.upper().strip()
                 holding_quantity = order_manager.get_position(symbol)
                 is_holding = holding_quantity != 0.0
 
                 if signal_direction == "BULLISH" and not is_holding:
-                    last_buy = last_buy_time.get(symbol)
-                    last_sell = last_sell_time.get(symbol)
+                    last_buy = last_buy_time.get(symbol_key)
+                    last_sell = last_sell_time.get(symbol_key)
 
                     if last_buy and now - last_buy < timedelta(minutes=15):
                         logger.info("Skipping BUY for %s due to buy cooldown.", symbol)
@@ -210,23 +211,25 @@ async def main() -> None:
                     account_equity = order_manager.get_account_equity()
                     target_capital = account_equity * 0.015 if account_equity > 0.0 else 0.0
                     calculated_shares = (target_capital / current_price) if current_price > 0.0 else 0.0
+                    trade_size = max(1, int(calculated_shares))
                     logger.info(
-                        "Sizing check | %s | equity=%.2f | target_capital=%.2f | current_price=%.2f | calculated_shares=%.2f | executed_quantity=10",
+                        "Sizing check | %s | equity=%.2f | target_capital=%.2f | current_price=%.2f | calculated_shares=%.2f | executed_quantity=%d",
                         symbol,
                         account_equity,
                         target_capital,
                         current_price,
                         calculated_shares,
+                        trade_size,
                     )
 
-                    await order_manager.execute_trade(symbol, "BUY", 10)
-                    last_buy_time[symbol] = now
-                    open_trade_memory[symbol] = {
+                    await order_manager.execute_trade(symbol, "BUY", trade_size)
+                    last_buy_time[symbol_key] = now
+                    open_trade_memory[symbol_key] = {
                         "technical_context": technical_context,
                         "prediction": signal_direction,
                         "entry_price": current_price,
                         "entry_time": now,
-                        "quantity": 10,
+                        "quantity": trade_size,
                     }
                     await discord_ui.send_execution_alert(
                         symbol=symbol,
@@ -234,19 +237,65 @@ async def main() -> None:
                         confidence=confidence,
                         market_story=technical_context,
                     )
-                    logger.info("BUY executed for %s with fixed quantity 10.", symbol)
+                    logger.info("BUY executed for %s with quantity %d.", symbol, trade_size)
                     return
 
+                if is_holding:
+                    trade_memory = open_trade_memory.get(symbol_key)
+                    entry_price = 0.0
+                    if trade_memory is not None:
+                        try:
+                            entry_price = float(trade_memory.get("entry_price", 0.0))
+                        except (TypeError, ValueError):
+                            entry_price = 0.0
+
+                    if entry_price > 0.0 and current_price > 0.0:
+                        loss_pct = ((entry_price - current_price) / entry_price) * 100.0
+                        if loss_pct >= 2.0:
+                            sell_quantity = max(1, int(abs(holding_quantity)))
+                            logger.warning(
+                                "EMERGENCY STOP-LOSS TRIGGERED for %s | entry_price=%.2f | current_price=%.2f | loss_pct=%.2f | quantity=%d",
+                                symbol,
+                                entry_price,
+                                current_price,
+                                loss_pct,
+                                sell_quantity,
+                            )
+
+                            await order_manager.execute_trade(symbol, "SELL", sell_quantity)
+                            last_sell_time[symbol_key] = now
+
+                            stopped_trade_memory = open_trade_memory.pop(symbol_key, None)
+                            if stopped_trade_memory:
+                                outcome = _trade_outcome(float(stopped_trade_memory.get("entry_price", 0.0)), current_price)
+                                news_client.record_trade_memory(
+                                    symbol=symbol,
+                                    technical_context=str(stopped_trade_memory.get("technical_context", technical_context)),
+                                    prediction=str(stopped_trade_memory.get("prediction", signal_direction)),
+                                    outcome=outcome,
+                                )
+
+                            await discord_ui.send_execution_alert(
+                                symbol=symbol,
+                                action="SELL",
+                                confidence=confidence,
+                                market_story=technical_context,
+                            )
+
+                            logger.info("SELL executed for %s with quantity %d due to emergency stop-loss.", symbol, sell_quantity)
+                            return
+
                 if signal_direction == "BEARISH" and is_holding:
-                    last_buy = last_buy_time.get(symbol)
+                    last_buy = last_buy_time.get(symbol_key)
                     if last_buy and now - last_buy < timedelta(minutes=5):
                         logger.info("Skipping SELL for %s because the minimum hold time has not elapsed.", symbol)
                         return
 
-                    await order_manager.execute_trade(symbol, "SELL", 10)
-                    last_sell_time[symbol] = now
+                    sell_quantity = max(1, int(abs(holding_quantity)))
+                    await order_manager.execute_trade(symbol, "SELL", sell_quantity)
+                    last_sell_time[symbol_key] = now
 
-                    trade_memory = open_trade_memory.pop(symbol, None)
+                    trade_memory = open_trade_memory.pop(symbol_key, None)
                     if trade_memory:
                         outcome = _trade_outcome(float(trade_memory.get("entry_price", 0.0)), current_price)
                         news_client.record_trade_memory(
@@ -263,7 +312,7 @@ async def main() -> None:
                         market_story=technical_context,
                     )
 
-                    logger.info("SELL executed for %s with fixed quantity 10.", symbol)
+                    logger.info("SELL executed for %s with quantity %d.", symbol, sell_quantity)
                     return
 
                 logger.info(
