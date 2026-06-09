@@ -30,67 +30,16 @@ class TradeApprovalView(discord.ui.View):
         await interaction.followup.send("Signal rejected. Order cancelled.")
 
 
-class OpenClawDiscord(commands.Bot):
-    def __init__(self, order_manager):
-        intents = discord.Intents.default()
-        intents.message_content = True  
-        super().__init__(command_prefix="!", intents=intents)
-        self.order_manager = order_manager
-        self.add_command(self.positions)
-        self.add_command(self.equity)
-        self.add_command(self.status)
-        
-        try:
-            self.channel_id = int(os.getenv("DISCORD_CHANNEL_ID", 0))
-        except (ValueError, TypeError):
-            logging.error("DISCORD_CHANNEL_ID in your .env file is missing or not a valid number.")
-            self.channel_id = None
+class TradingCommands(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.order_manager = bot.order_manager
 
     def _format_currency(self, value):
         try:
             return f"${float(value):,.2f}"
         except (TypeError, ValueError):
             return "$0.00"
-
-    async def on_ready(self):
-        logging.info(f"OpenClaw UI online. Hooked as: {self.user}")
-
-    async def _get_target_channel(self):
-        if not self.channel_id:
-            return None
-
-        channel = self.get_channel(self.channel_id)
-        if channel is not None:
-            return channel
-
-        try:
-            return await self.fetch_channel(self.channel_id)
-        except Exception as exc:
-            logging.error("Unable to resolve Discord channel %s: %s", self.channel_id, exc)
-            return None
-
-    async def send_trade_signal(self, symbol, market_story, llm_prediction):
-        if not self.channel_id:
-            logging.error("Trade signal suppressed: Missing target Discord Channel ID configuration.")
-            return
-        channel = await self._get_target_channel()
-        if channel is None:
-            logging.error("Trade signal suppressed: Discord channel could not be resolved.")
-            return
-
-
-        is_bullish = llm_prediction.upper() == "UP"
-        embed = discord.Embed(
-            title=f"SIGNAL DETECTED: {symbol}", 
-            color=0x00ff00 if is_bullish else 0xff0000
-        )
-        embed.add_field(name="Llama 3.2 Prediction", value=f"**{llm_prediction}**", inline=False)
-        embed.add_field(name="The Market Story", value=f"```{market_story}```", inline=False)
-
-        side = "BUY" if is_bullish else "SELL"
-        view = TradeApprovalView(self.order_manager, symbol, side)
-        
-        await channel.send(embed=embed, view=view)
 
     @commands.command(name="positions")
     async def positions(self, ctx):
@@ -146,6 +95,63 @@ class OpenClawDiscord(commands.Bot):
             logging.error("Failed to retrieve gateway status: %s", exc)
             embed = discord.Embed(title="OpenClaw Status", description="Unable to retrieve status right now.", color=0x992D22)
             await ctx.send(embed=embed)
+
+
+class OpenClawDiscord(commands.Bot):
+    def __init__(self, order_manager):
+        intents = discord.Intents.default()
+        intents.message_content = True  
+        super().__init__(command_prefix="!", intents=intents)
+        self.order_manager = order_manager
+        
+        try:
+            self.channel_id = int(os.getenv("DISCORD_CHANNEL_ID", 0))
+        except (ValueError, TypeError):
+            logging.error("DISCORD_CHANNEL_ID in your .env file is missing or not a valid number.")
+            self.channel_id = None
+
+    async def setup_hook(self):
+        await self.add_cog(TradingCommands(self))
+
+    async def on_ready(self):
+        logging.info(f"OpenClaw UI online. Hooked as: {self.user}")
+
+    async def _get_target_channel(self):
+        if not self.channel_id:
+            return None
+
+        channel = self.get_channel(self.channel_id)
+        if channel is not None:
+            return channel
+
+        try:
+            return await self.fetch_channel(self.channel_id)
+        except Exception as exc:
+            logging.error("Unable to resolve Discord channel %s: %s", self.channel_id, exc)
+            return None
+
+    async def send_trade_signal(self, symbol, market_story, llm_prediction):
+        if not self.channel_id:
+            logging.error("Trade signal suppressed: Missing target Discord Channel ID configuration.")
+            return
+        channel = await self._get_target_channel()
+        if channel is None:
+            logging.error("Trade signal suppressed: Discord channel could not be resolved.")
+            return
+
+
+        is_bullish = llm_prediction.upper() == "UP"
+        embed = discord.Embed(
+            title=f"SIGNAL DETECTED: {symbol}", 
+            color=0x00ff00 if is_bullish else 0xff0000
+        )
+        embed.add_field(name="Llama 3.2 Prediction", value=f"**{llm_prediction}**", inline=False)
+        embed.add_field(name="The Market Story", value=f"```{market_story}```", inline=False)
+
+        side = "BUY" if is_bullish else "SELL"
+        view = TradeApprovalView(self.order_manager, symbol, side)
+        
+        await channel.send(embed=embed, view=view)
 
     async def send_execution_alert(self, symbol, action, confidence, market_story):
         if not self.channel_id:
