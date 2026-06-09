@@ -36,12 +36,21 @@ class OpenClawDiscord(commands.Bot):
         intents.message_content = True  
         super().__init__(command_prefix="!", intents=intents)
         self.order_manager = order_manager
+        self.add_command(self.positions)
+        self.add_command(self.equity)
+        self.add_command(self.status)
         
         try:
             self.channel_id = int(os.getenv("DISCORD_CHANNEL_ID", 0))
         except (ValueError, TypeError):
             logging.error("DISCORD_CHANNEL_ID in your .env file is missing or not a valid number.")
             self.channel_id = None
+
+    def _format_currency(self, value):
+        try:
+            return f"${float(value):,.2f}"
+        except (TypeError, ValueError):
+            return "$0.00"
 
     async def on_ready(self):
         logging.info(f"OpenClaw UI online. Hooked as: {self.user}")
@@ -82,6 +91,61 @@ class OpenClawDiscord(commands.Bot):
         view = TradeApprovalView(self.order_manager, symbol, side)
         
         await channel.send(embed=embed, view=view)
+
+    @commands.command(name="positions")
+    async def positions(self, ctx):
+        try:
+            active_positions = []
+            for position in self.order_manager.ib.positions():
+                shares = float(getattr(position, "position", 0.0) or 0.0)
+                if shares == 0.0:
+                    continue
+
+                symbol = getattr(position.contract, "symbol", "UNKNOWN")
+                average_cost = getattr(position, "avgCost", 0.0)
+                active_positions.append(
+                    f"**{symbol}** | Shares: {shares:,.2f} | Average Cost: {self._format_currency(average_cost)}"
+                )
+
+            embed = discord.Embed(title="Active Positions", color=0x2F3136)
+            if active_positions:
+                embed.description = "\n".join(active_positions)
+            else:
+                embed.description = "No active positions held."
+
+            await ctx.send(embed=embed)
+        except Exception as exc:
+            logging.error("Failed to retrieve positions: %s", exc)
+            embed = discord.Embed(title="Active Positions", description="Unable to retrieve positions right now.", color=0x992D22)
+            await ctx.send(embed=embed)
+
+    @commands.command(name="equity")
+    async def equity(self, ctx):
+        try:
+            account_equity = self.order_manager.get_account_equity()
+            embed = discord.Embed(title="Account Equity", color=0x2F3136)
+            embed.description = self._format_currency(account_equity)
+            await ctx.send(embed=embed)
+        except Exception as exc:
+            logging.error("Failed to retrieve account equity: %s", exc)
+            embed = discord.Embed(title="Account Equity", description="Unable to retrieve account equity right now.", color=0x992D22)
+            await ctx.send(embed=embed)
+
+    @commands.command(name="status")
+    async def status(self, ctx):
+        try:
+            is_connected = self.order_manager.ib.isConnected()
+            gateway_status = "Connected" if is_connected else "Disconnected"
+
+            embed = discord.Embed(title="OpenClaw Status", color=0x2F3136)
+            embed.add_field(name="Gateway Status", value=gateway_status, inline=False)
+            embed.add_field(name="Active AI Engine", value="OpenClaw V2", inline=False)
+
+            await ctx.send(embed=embed)
+        except Exception as exc:
+            logging.error("Failed to retrieve gateway status: %s", exc)
+            embed = discord.Embed(title="OpenClaw Status", description="Unable to retrieve status right now.", color=0x992D22)
+            await ctx.send(embed=embed)
 
     async def send_execution_alert(self, symbol, action, confidence, market_story):
         if not self.channel_id:
