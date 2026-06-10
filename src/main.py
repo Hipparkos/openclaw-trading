@@ -4,6 +4,7 @@ import logging
 import os
 import signal
 import sys
+import math
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from execution.order_manager import OrderManager
@@ -153,15 +154,15 @@ async def main() -> None:
         async def _stream_news() -> None:
             logger.info("Starting news stream...")
 
-            async def _build_trade_snapshot(symbol: str) -> tuple[str, float]:
+            async def _build_trade_snapshot(symbol: str) -> tuple[str, float, float]:
                 bars_5m = list(client.data_buffer.get(symbol, {}).get("5 mins", []))
                 if len(bars_5m) < 2:
-                    return "Insufficient 5-minute market data yet.", 0.0
+                    return "Insufficient 5-minute market data yet.", 0.0, 0.0
 
                 indicator_calculator = IndicatorCalculator()
                 df = await asyncio.to_thread(indicator_calculator.calculate_all, bars_5m)
                 if df.empty:
-                    return "Technical dataframe is empty.", 0.0
+                    return "Technical dataframe is empty.", 0.0, 0.0
 
                 strategy_engine = StrategyEngine()
                 technical_context = await asyncio.to_thread(strategy_engine.evaluate_signals, df)
@@ -174,7 +175,16 @@ async def main() -> None:
                     except (TypeError, ValueError):
                         current_price = 0.0
 
-                return technical_context, current_price
+                current_atr = 0.0
+                latest_atr = df.iloc[-1].get("atr_14", 0.0)
+                try:
+                    current_atr = float(latest_atr)
+                    if not math.isfinite(current_atr):
+                        current_atr = 0.0
+                except (TypeError, ValueError):
+                    current_atr = 0.0
+
+                return technical_context, current_price, current_atr
 
             def _trade_outcome(entry_price: float, exit_price: float) -> str:
                 if entry_price <= 0.0 or exit_price <= 0.0:
@@ -189,6 +199,7 @@ async def main() -> None:
                 signal_direction: str,
                 technical_context: str,
                 current_price: float,
+                current_atr: float,
                 confidence: float,
             ) -> None:
                 now = datetime.now(timezone.utc)
@@ -230,6 +241,8 @@ async def main() -> None:
                         "entry_price": current_price,
                         "entry_time": now,
                         "quantity": trade_size,
+                        "highest_price_seen": current_price,
+                        "initial_atr": current_atr,
                     }
                     stop_loss = current_price * 0.98 if current_price > 0.0 else "N/A"
                     target_price = current_price * 1.04 if current_price > 0.0 else "N/A"
@@ -342,7 +355,98 @@ async def main() -> None:
             
             while not shutdown_event.is_set():
                 for symbol in settings["tickers"]:
-                    technical_context, current_price = await _build_trade_snapshot(symbol)
+                    technical_context, current_price, current_atr = await _build_trade_snapshot(symbol)
+
+                    holding_quantity = order_manager.get_position(symbol)
+                    is_holding = holding_quantity != 0.0
+                    symbol_key = symbol.upper().strip()
+
+                    if is_holding:
+                        trade_memory = open_trade_memory.get(symbol_key)
+                        if trade_memory is not None:
+                            try:
+                                highest_price_seen = float(trade_memory.get("highest_price_seen", trade_memory.get("entry_price", current_price)))
+                            except (TypeError, ValueError):
+                                highest_price_seen = float(trade_memory.get("entry_price", current_price) or current_price)
+
+                            if current_price > highest_price_seen:
+                                trade_memory["highest_price_seen"] = current_price
+                                highest_price_seen = current_price
+
+                            try:
+                                entry_price = float(trade_memory.get("entry_price", 0.0))
+                            except (TypeError, ValueError):
+                                entry_price = 0.0
+
+                            try:
+                                initial_atr = float(trade_memory.get("initial_atr", 0.0))
+                            except (TypeError, ValueError):
+                                initial_atr = 0.0
+
+                            trailing_stop_level = highest_price_seen - (2 * current_atr)
+                            if current_price > 0.0 and current_price <= trailing_stop_level:
+                                sell_quantity = max(1, int(abs(holding_quantity)))
+                                logger.warning("ATR TRAILING STOP TRIGGERED for %s", symbol)
+
+                                await order_manager.execute_trade(symbol, "SELL", sell_quantity)
+                                last_sell_time[symbol_key] = datetime.now(timezone.utc)
+
+                                stopped_trade_memory = open_trade_memory.pop(symbol_key, None)
+                                if stopped_trade_memory:
+                                    outcome = _trade_outcome(float(stopped_trade_memory.get("entry_price", 0.0)), current_price)
+                                    news_client.record_trade_memory(
+                                        symbol=symbol,
+                                        technical_context=str(stopped_trade_memory.get("technical_context", technical_context)),
+                                        prediction=str(stopped_trade_memory.get("prediction", "BULLISH")),
+                                        outcome=outcome,
+                                    )
+
+                                await discord_ui.send_execution_alert(
+                                    symbol=symbol,
+                                    action="SELL",
+                                    confidence=1.0,
+                                    market_story=technical_context,
+                                    entry_price=current_price,
+                                    target_price="N/A",
+                                    stop_loss=trailing_stop_level,
+                                    quantity=sell_quantity,
+                                )
+
+                                logger.info("SELL executed for %s with quantity %d due to ATR trailing stop.", symbol, sell_quantity)
+                                continue
+
+                            take_profit_level = entry_price + (3 * initial_atr)
+                            if entry_price > 0.0 and initial_atr > 0.0 and current_price >= take_profit_level:
+                                sell_quantity = max(1, int(abs(holding_quantity)))
+                                logger.warning("TAKE PROFIT TARGET MET for %s", symbol)
+
+                                await order_manager.execute_trade(symbol, "SELL", sell_quantity)
+                                last_sell_time[symbol_key] = datetime.now(timezone.utc)
+
+                                stopped_trade_memory = open_trade_memory.pop(symbol_key, None)
+                                if stopped_trade_memory:
+                                    outcome = _trade_outcome(float(stopped_trade_memory.get("entry_price", 0.0)), current_price)
+                                    news_client.record_trade_memory(
+                                        symbol=symbol,
+                                        technical_context=str(stopped_trade_memory.get("technical_context", technical_context)),
+                                        prediction=str(stopped_trade_memory.get("prediction", "BULLISH")),
+                                        outcome=outcome,
+                                    )
+
+                                await discord_ui.send_execution_alert(
+                                    symbol=symbol,
+                                    action="SELL",
+                                    confidence=1.0,
+                                    market_story=technical_context,
+                                    entry_price=current_price,
+                                    target_price=take_profit_level,
+                                    stop_loss="N/A",
+                                    quantity=sell_quantity,
+                                )
+
+                                logger.info("SELL executed for %s with quantity %d due to take profit.", symbol, sell_quantity)
+                                continue
+
                     news_items = await news_client.fetch_latest_news(symbol, technical_context=technical_context)
                     
                     for news_item in news_items:

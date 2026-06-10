@@ -61,4 +61,6 @@ class IndicatorCalculator:
         if vwap is not None:
             df["vwap"] = vwap
 
+        df["atr_14"] = ta.atr(df["high"], df["low"], df["close"], length=14)
+
         return df
