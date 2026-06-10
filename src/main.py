@@ -472,6 +472,7 @@ async def main() -> None:
                             signal_direction=signal_direction,
                             technical_context=technical_context,
                             current_price=current_price,
+                            current_atr=current_atr,
                             confidence=confidence,
                         )
                         break
