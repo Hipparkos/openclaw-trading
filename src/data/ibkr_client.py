@@ -79,39 +79,23 @@ class IBKRClient:
 
     # Connect async - reliable connect with retries
     async def connect(self) -> None:
-        attempt = 0
-        ports_to_try = [4004]
-        
-        while True:
-            for port in ports_to_try:
-                current_client_id = self.client_id + attempt
-                
-                try:
-                    self.logger.info(f"Attempting API handshake at {self.host}:{port} with Client ID {current_client_id}...")
-                    
-                    await self.ib.connectAsync(
-                        self.host,
-                        port,
-                        clientId=current_client_id,
-                        timeout=10, 
-                    )
-                    self.logger.info(f"SUCCESS: Connected to IBKR at {self.host}:{port}!")
-                    self.port = port
-                    self.ib.reqAccountUpdates(True, "")
-                    return
-                except Exception as exc:
-                    self.logger.debug(f"Port {port} rejected handshake: {exc}")
-            
-            attempt += 1
-            if attempt >= self.max_retries:
-                self.logger.critical("Exhausted all connection retries on all ports.")
-                raise RuntimeError("Unable to connect to IBKR")
-            
-            self.logger.warning(
-                f"Handshake failed ({attempt}/{self.max_retries}). Gateway may still be configuring. "
-                f"Retrying in {self.retry_delay}s"
+        port = 4004
+
+        try:
+            self.logger.info(f"Attempting API handshake at {self.host}:{port} with Client ID {self.client_id}...")
+
+            await self.ib.connectAsync(
+                self.host,
+                port,
+                clientId=self.client_id,
+                timeout=15,
             )
-            await asyncio.sleep(self.retry_delay)
+            self.logger.info(f"SUCCESS: Connected to IBKR at {self.host}:{port}!")
+            self.port = port
+            self.ib.reqAccountUpdates(True, "")
+        except Exception as exc:
+            self.logger.error(f"Handshake failed on port {port}: {exc}")
+            raise RuntimeError("Unable to connect to IBKR")
 
     # Bar update handler - log incoming bars
     def _handle_bar_update(self, symbol: str, bar_size: str) -> Callable[[Any, bool], None]:
