@@ -154,7 +154,7 @@ class OpenClawDiscord(commands.Bot):
         
         await channel.send(embed=embed, view=view)
 
-    async def send_execution_alert(self, symbol, action, confidence, market_story):
+    async def send_execution_alert(self, symbol, action, confidence, market_story, entry_price, target_price, stop_loss, quantity):
         if not self.channel_id:
             logging.error("Execution alert suppressed: Missing target Discord Channel ID configuration.")
             return
@@ -169,8 +169,18 @@ class OpenClawDiscord(commands.Bot):
             title=f"EXECUTION ALERT: {symbol}",
             color=color,
         )
+        def _format_currency(value):
+            try:
+                return f"${float(value):,.2f}"
+            except (TypeError, ValueError):
+                return str(value)
+
         embed.add_field(name="Action", value=str(action).upper(), inline=True)
         embed.add_field(name="Confidence", value=f"{float(confidence):.2f}", inline=True)
-        embed.add_field(name="Market Story", value=f"```{market_story}```", inline=False)
+        embed.add_field(name="Entry Price", value=_format_currency(entry_price), inline=True)
+        embed.add_field(name="Target Price", value=_format_currency(target_price), inline=True)
+        embed.add_field(name="Stop Loss", value=_format_currency(stop_loss), inline=True)
+        embed.add_field(name="Quantity", value=f"{int(quantity):,}", inline=True)
+        embed.add_field(name="Execution Rationale", value=f"```{market_story}```", inline=False)
 
         await channel.send(embed=embed)

@@ -231,11 +231,17 @@ async def main() -> None:
                         "entry_time": now,
                         "quantity": trade_size,
                     }
+                    stop_loss = current_price * 0.98 if current_price > 0.0 else "N/A"
+                    target_price = current_price * 1.04 if current_price > 0.0 else "N/A"
                     await discord_ui.send_execution_alert(
                         symbol=symbol,
                         action="BUY",
                         confidence=confidence,
                         market_story=technical_context,
+                        entry_price=current_price,
+                        target_price=target_price,
+                        stop_loss=stop_loss,
+                        quantity=trade_size,
                     )
                     logger.info("BUY executed for %s with quantity %d.", symbol, trade_size)
                     return
@@ -275,11 +281,17 @@ async def main() -> None:
                                     outcome=outcome,
                                 )
 
+                            stop_loss = "N/A"
+                            target_price = "N/A"
                             await discord_ui.send_execution_alert(
                                 symbol=symbol,
                                 action="SELL",
                                 confidence=confidence,
                                 market_story=technical_context,
+                                entry_price=current_price,
+                                target_price=target_price,
+                                stop_loss=stop_loss,
+                                quantity=sell_quantity,
                             )
 
                             logger.info("SELL executed for %s with quantity %d due to emergency stop-loss.", symbol, sell_quantity)
@@ -305,11 +317,17 @@ async def main() -> None:
                             outcome=outcome,
                         )
 
+                    stop_loss = "N/A"
+                    target_price = "N/A"
                     await discord_ui.send_execution_alert(
                         symbol=symbol,
                         action="SELL",
                         confidence=confidence,
                         market_story=technical_context,
+                        entry_price=current_price,
+                        target_price=target_price,
+                        stop_loss=stop_loss,
+                        quantity=sell_quantity,
                     )
 
                     logger.info("SELL executed for %s with quantity %d.", symbol, sell_quantity)
