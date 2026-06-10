@@ -482,7 +482,26 @@ async def main() -> None:
                     continue
 
         asyncio.create_task(_stream_news())
-        await client.stream_market_data()
+
+        startup_attempts = 12
+        for attempt in range(1, startup_attempts + 1):
+            try:
+                await client.stream_market_data()
+                break
+            except RuntimeError as exc:
+                if shutdown_event.is_set():
+                    raise
+
+                if attempt >= startup_attempts:
+                    raise
+
+                logger.warning(
+                    "IBKR startup handshake failed (%d/%d): %s. Retrying in 5 seconds.",
+                    attempt,
+                    startup_attempts,
+                    exc,
+                )
+                await asyncio.sleep(5)
 
         config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="warning")
         server = uvicorn.Server(config)
