@@ -81,8 +81,8 @@ class TradingCommands(commands.Cog):
             embed = discord.Embed(title="Account Equity", description="Unable to retrieve account equity right now.", color=0x992D22)
             await ctx.send(embed=embed)
 
-    @commands.command(name="sellall")
-    async def sellall(self, ctx):
+    @commands.command(name="closeall")
+    async def closeall(self, ctx):
         if not callable(getattr(self.bot, "on_manual_sell", None)):
             await ctx.send("Manual liquidation is not available right now.")
             return

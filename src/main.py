@@ -241,21 +241,43 @@ async def main() -> None:
                 return 0.0
         return 0.0
 
+    def _get_target_stop_for_direction(entry_price: float, is_long: bool) -> tuple:
+        """Calculate target and stop prices based on position direction.
+
+        Long: target = entry * 1.04 (sell higher), stop = entry * 0.98 (sell lower)
+        Short: target = entry * 0.96 (buy lower), stop = entry * 1.02 (buy higher)
+        """
+        if entry_price <= 0.0:
+            return "N/A", "N/A"
+        if is_long:
+            return entry_price * 1.04, entry_price * 0.98
+        else:
+            return entry_price * 0.96, entry_price * 1.02
+
     async def liquidate_all_positions(reason: str = "Manual") -> List[str]:
         results: List[str] = []
         now = datetime.now(timezone.utc)
         for symbol, quantity in order_manager.get_all_positions().items():
-            sell_qty = max(1, int(abs(quantity)))
-            await order_manager.execute_trade(symbol, "SELL", sell_qty)
+            is_long = quantity > 0
+            action = "SELL" if is_long else "BUY"
+            close_qty = max(1, int(abs(quantity)))
+
+            await order_manager.execute_trade(symbol, action, close_qty)
             symbol_key = symbol.upper().strip()
             last_sell_time[symbol_key] = now
+
             trade_memory = open_trade_memory.pop(symbol_key, None)
             if trade_memory:
                 entry_price = float(trade_memory.get("entry_price", 0.0))
                 exit_price = _get_last_price(symbol) or entry_price
                 confidence = float(trade_memory.get("entry_confidence", 0.0))
-                _record_closed_trade(entry_price, exit_price, sell_qty, confidence)
-                outcome_pct = ((exit_price - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
+                _record_closed_trade(entry_price, exit_price, close_qty, confidence)
+
+                if is_long:
+                    outcome_pct = ((exit_price - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
+                else:
+                    outcome_pct = ((entry_price - exit_price) / entry_price * 100) if entry_price > 0 else 0.0
+
                 outcome_label = "Win" if outcome_pct >= 0 else "Loss"
                 await news_client.record_trade_memory_async(
                     symbol=symbol,
@@ -263,8 +285,8 @@ async def main() -> None:
                     prediction=str(trade_memory.get("prediction", "BULLISH")),
                     outcome=f"{outcome_pct:+.2f}% ({outcome_label})",
                 )
-            results.append(f"{symbol}: SELL {sell_qty} shares [{reason}]")
-            logger.info("Liquidated %s x%d — reason: %s", symbol, sell_qty, reason)
+            results.append(f"{symbol}: {action} {close_qty} shares [{reason}]")
+            logger.info("Closed %s x%d via %s — reason: %s", symbol, close_qty, action, reason)
         return results
 
     discord_ui.on_manual_sell = liquidate_all_positions
@@ -424,17 +446,21 @@ async def main() -> None:
                                     outcome=outcome,
                                 )
 
+                            is_long = holding_quantity > 0
+                            action = "SELL" if is_long else "BUY"
+                            target_price, stop_loss = _get_target_stop_for_direction(entry_price, is_long)
+
                             await discord_ui.send_execution_alert(
                                 symbol=symbol,
-                                action="SELL",
+                                action=action,
                                 confidence=confidence,
                                 market_story=technical_context,
                                 entry_price=current_price,
-                                target_price="N/A",
-                                stop_loss="N/A",
+                                target_price=target_price,
+                                stop_loss=stop_loss,
                                 quantity=sell_quantity,
                             )
-                            logger.info("SELL executed for %s with quantity %d due to emergency stop-loss.", symbol, sell_quantity)
+                            logger.info("%s executed for %s with quantity %d due to emergency stop-loss.", action, symbol, sell_quantity)
                             return
 
                 if signal_direction == "BEARISH" and is_holding:
@@ -448,6 +474,7 @@ async def main() -> None:
                     last_sell_time[symbol_key] = now
 
                     trade_memory = open_trade_memory.pop(symbol_key, None)
+                    entry_price_mem = 0.0
                     if trade_memory:
                         entry_price_mem = float(trade_memory.get("entry_price", 0.0))
                         entry_conf = float(trade_memory.get("entry_confidence", 0.0))
@@ -460,17 +487,21 @@ async def main() -> None:
                             outcome=outcome,
                         )
 
+                    is_long = holding_quantity > 0
+                    action = "SELL" if is_long else "BUY"
+                    target_price, stop_loss = _get_target_stop_for_direction(entry_price_mem, is_long)
+
                     await discord_ui.send_execution_alert(
                         symbol=symbol,
-                        action="SELL",
+                        action=action,
                         confidence=confidence,
                         market_story=technical_context,
                         entry_price=current_price,
-                        target_price="N/A",
-                        stop_loss="N/A",
+                        target_price=target_price,
+                        stop_loss=stop_loss,
                         quantity=sell_quantity,
                     )
-                    logger.info("SELL executed for %s with quantity %d.", symbol, sell_quantity)
+                    logger.info("%s executed for %s with quantity %d.", action, symbol, sell_quantity)
                     return
 
                 logger.info(
@@ -550,17 +581,21 @@ async def main() -> None:
                                         outcome=outcome,
                                     )
 
+                                is_long = holding_quantity > 0
+                                action = "SELL" if is_long else "BUY"
+                                target_price, _ = _get_target_stop_for_direction(entry_price, is_long)
+
                                 await discord_ui.send_execution_alert(
                                     symbol=symbol,
-                                    action="SELL",
+                                    action=action,
                                     confidence=1.0,
                                     market_story=technical_context,
                                     entry_price=current_price,
-                                    target_price="N/A",
+                                    target_price=target_price,
                                     stop_loss=trailing_stop_level,
                                     quantity=sell_quantity,
                                 )
-                                logger.info("SELL executed for %s with quantity %d due to ATR trailing stop.", symbol, sell_quantity)
+                                logger.info("%s executed for %s with quantity %d due to ATR trailing stop.", action, symbol, sell_quantity)
                                 continue
 
                             take_profit_level = entry_price + (3 * initial_atr)
@@ -582,17 +617,21 @@ async def main() -> None:
                                         outcome=outcome,
                                     )
 
+                                is_long = holding_quantity > 0
+                                action = "SELL" if is_long else "BUY"
+                                _, stop_loss = _get_target_stop_for_direction(entry_price, is_long)
+
                                 await discord_ui.send_execution_alert(
                                     symbol=symbol,
-                                    action="SELL",
+                                    action=action,
                                     confidence=1.0,
                                     market_story=technical_context,
                                     entry_price=current_price,
                                     target_price=take_profit_level,
-                                    stop_loss="N/A",
+                                    stop_loss=stop_loss,
                                     quantity=sell_quantity,
                                 )
-                                logger.info("SELL executed for %s with quantity %d due to take profit.", symbol, sell_quantity)
+                                logger.info("%s executed for %s with quantity %d due to take profit.", action, symbol, sell_quantity)
                                 continue
 
                     # News evaluation runs continuously (pre-market builds context, only executes when open)
