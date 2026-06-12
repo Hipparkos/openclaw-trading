@@ -5,11 +5,12 @@ import os
 import signal
 import sys
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 from logging.handlers import RotatingFileHandler
 from execution.order_manager import OrderManager
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
@@ -22,6 +23,9 @@ from data.news_client import NewsClient
 from discord_bot.controller import OpenClawDiscord
 from strategy.indicators import IndicatorCalculator
 from strategy.logic import StrategyEngine
+
+_ET = ZoneInfo("America/New_York")
+
 
 class ConfigurationError(Exception):
     pass
@@ -38,18 +42,17 @@ class TradeRequest(BaseModel):
 
 @app.get("/status")
 async def get_status(request: Request) -> Dict[str, Any]:
-    # Expose live connection status.
     client = request.app.state.client
     settings = request.app.state.settings
     return {
         "ibkr_connected": client.ib.isConnected(),
         "active_tickers": settings["tickers"],
+        "market_open": is_market_open(),
     }
 
 
 @app.post("/execute")
 async def execute_trade(request: Request, trade_request: TradeRequest) -> Dict[str, Any]:
-    # Allow external trade execution.
     action = trade_request.action.upper()
     if action not in {"BUY", "SELL"}:
         raise HTTPException(status_code=400, detail="action must be BUY or SELL")
@@ -69,7 +72,6 @@ async def execute_trade(request: Request, trade_request: TradeRequest) -> Dict[s
 
 
 def setup_logging() -> None:
-    # Keep runtime logs and errors.
     log_dir = Path(__file__).resolve().parents[1] / "data" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -87,7 +89,6 @@ def setup_logging() -> None:
 
 
 def load_settings(path: Path) -> Dict[str, Any]:
-    # Load validated runtime configuration.
     if not path.exists():
         raise ConfigurationError(f"Configuration file missing at: {path}")
 
@@ -100,14 +101,90 @@ def load_settings(path: Path) -> Dict[str, Any]:
     return settings
 
 
+def _now_et() -> datetime:
+    return datetime.now(_ET)
+
+
+def is_market_open() -> bool:
+    now = _now_et()
+    if now.weekday() >= 5:
+        return False
+    opens = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    closes = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    return opens <= now < closes
+
+
+def _is_pre_close() -> bool:
+    """True during the 10-minute window before market close (15:50–16:00 ET)."""
+    now = _now_et()
+    if now.weekday() >= 5:
+        return False
+    pre_close = now.replace(hour=15, minute=50, second=0, microsecond=0)
+    closes = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    return pre_close <= now < closes
+
+
+def _is_just_after_close() -> bool:
+    """True for the 10-minute window immediately after market close (16:00–16:10 ET)."""
+    now = _now_et()
+    if now.weekday() >= 5:
+        return False
+    closes = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    recap_end = now.replace(hour=16, minute=10, second=0, microsecond=0)
+    return closes <= now < recap_end
+
+
+def _compute_eod_stats(daily_closed_trades: List[Dict[str, Any]], account_equity: float) -> Dict[str, Any]:
+    total = len(daily_closed_trades)
+    if total == 0:
+        return {
+            "net_pnl": 0.0,
+            "account_equity": account_equity,
+            "total_trades": 0,
+            "wins": 0,
+            "avg_win": 0.0,
+            "avg_loss": 0.0,
+            "largest_win": 0.0,
+            "largest_loss": 0.0,
+            "avg_confidence_wins": 0.0,
+            "avg_confidence_losses": 0.0,
+        }
+
+    net_pnl = sum(t["pnl"] for t in daily_closed_trades)
+    win_trades = [t for t in daily_closed_trades if t["pnl"] >= 0]
+    loss_trades = [t for t in daily_closed_trades if t["pnl"] < 0]
+
+    avg_win = sum(t["pnl"] for t in win_trades) / len(win_trades) if win_trades else 0.0
+    avg_loss = sum(t["pnl"] for t in loss_trades) / len(loss_trades) if loss_trades else 0.0
+    largest_win = max((t["pnl"] for t in win_trades), default=0.0)
+    largest_loss = min((t["pnl"] for t in loss_trades), default=0.0)
+
+    conf_wins = [t["confidence"] for t in win_trades if t["confidence"] > 0]
+    conf_losses = [t["confidence"] for t in loss_trades if t["confidence"] > 0]
+    avg_conf_win = sum(conf_wins) / len(conf_wins) if conf_wins else 0.0
+    avg_conf_loss = sum(conf_losses) / len(conf_losses) if conf_losses else 0.0
+
+    return {
+        "net_pnl": net_pnl,
+        "account_equity": account_equity,
+        "total_trades": total,
+        "wins": len(win_trades),
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "largest_win": largest_win,
+        "largest_loss": largest_loss,
+        "avg_confidence_wins": avg_conf_win,
+        "avg_confidence_losses": avg_conf_loss,
+    }
+
+
 async def main() -> None:
-    # Coordinate IBKR, API, shutdown.
     setup_logging()
     load_dotenv()
     logger = logging.getLogger("Main")
 
     settings_path = Path(__file__).resolve().parents[1] / "config" / "settings.yaml"
-    
+
     try:
         settings = load_settings(settings_path)
     except ConfigurationError as e:
@@ -127,12 +204,16 @@ async def main() -> None:
     last_sell_time: Dict[str, datetime] = {}
     open_trade_memory: Dict[str, Dict[str, Any]] = {}
 
+    # Day-scoped state — reset each trading day
+    daily_closed_trades: List[Dict[str, Any]] = []
+    eod_recap_sent_date: Optional[date] = None
+    eod_liquidation_done_date: Optional[date] = None
+
     app.state.client = client
     app.state.settings = settings
     app.state.order_manager = order_manager
 
     def graceful_shutdown() -> None:
-        # Stop tasks without dropping orders.
         logger.info("Shutdown signal received. Initiating graceful exit...")
         shutdown_event.set()
 
@@ -142,6 +223,51 @@ async def main() -> None:
     except NotImplementedError:
         signal.signal(signal.SIGINT, lambda sig, frame: loop.call_soon_threadsafe(graceful_shutdown))
         signal.signal(signal.SIGTERM, lambda sig, frame: loop.call_soon_threadsafe(graceful_shutdown))
+
+    def _record_closed_trade(entry_price: float, exit_price: float, quantity: float, confidence: float) -> None:
+        if entry_price > 0.0 and exit_price > 0.0:
+            pnl = (exit_price - entry_price) * quantity
+            daily_closed_trades.append({
+                "pnl": pnl,
+                "confidence": confidence,
+            })
+
+    def _get_last_price(symbol: str) -> float:
+        bars = list(client.data_buffer.get(symbol, {}).get("5 mins", []))
+        if bars:
+            try:
+                return float(bars[-1].close)
+            except (TypeError, ValueError, AttributeError):
+                return 0.0
+        return 0.0
+
+    async def liquidate_all_positions(reason: str = "Manual") -> List[str]:
+        results: List[str] = []
+        now = datetime.now(timezone.utc)
+        for symbol, quantity in order_manager.get_all_positions().items():
+            sell_qty = max(1, int(abs(quantity)))
+            await order_manager.execute_trade(symbol, "SELL", sell_qty)
+            symbol_key = symbol.upper().strip()
+            last_sell_time[symbol_key] = now
+            trade_memory = open_trade_memory.pop(symbol_key, None)
+            if trade_memory:
+                entry_price = float(trade_memory.get("entry_price", 0.0))
+                exit_price = _get_last_price(symbol) or entry_price
+                confidence = float(trade_memory.get("entry_confidence", 0.0))
+                _record_closed_trade(entry_price, exit_price, sell_qty, confidence)
+                outcome_pct = ((exit_price - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
+                outcome_label = "Win" if outcome_pct >= 0 else "Loss"
+                await news_client.record_trade_memory_async(
+                    symbol=symbol,
+                    technical_context=str(trade_memory.get("technical_context", "")),
+                    prediction=str(trade_memory.get("prediction", "BULLISH")),
+                    outcome=f"{outcome_pct:+.2f}% ({outcome_label})",
+                )
+            results.append(f"{symbol}: SELL {sell_qty} shares [{reason}]")
+            logger.info("Liquidated %s x%d — reason: %s", symbol, sell_qty, reason)
+        return results
+
+    discord_ui.on_manual_sell = liquidate_all_positions
 
     try:
         logger.info("Starting...")
@@ -189,7 +315,6 @@ async def main() -> None:
             def _trade_outcome(entry_price: float, exit_price: float) -> str:
                 if entry_price <= 0.0 or exit_price <= 0.0:
                     return "UNKNOWN"
-
                 pct_change = ((exit_price - entry_price) / entry_price) * 100.0
                 outcome_label = "Win" if pct_change >= 0.0 else "Loss"
                 return f"{pct_change:+.2f}% ({outcome_label})"
@@ -202,6 +327,15 @@ async def main() -> None:
                 current_atr: float,
                 confidence: float,
             ) -> None:
+                # Gate all order execution to regular market hours only.
+                if not is_market_open():
+                    logger.info(
+                        "Pre/after-market signal detected for %s | signal=%s | confidence=%.2f | "
+                        "Evaluating only — execution gated until 09:30 ET.",
+                        symbol, signal_direction, confidence,
+                    )
+                    return
+
                 now = datetime.now(timezone.utc)
                 symbol_key = symbol.upper().strip()
                 holding_quantity = order_manager.get_position(symbol)
@@ -224,13 +358,9 @@ async def main() -> None:
                     calculated_shares = (target_capital / current_price) if current_price > 0.0 else 0.0
                     trade_size = max(1, int(calculated_shares))
                     logger.info(
-                        "Sizing check | %s | equity=%.2f | target_capital=%.2f | current_price=%.2f | calculated_shares=%.2f | executed_quantity=%d",
-                        symbol,
-                        account_equity,
-                        target_capital,
-                        current_price,
-                        calculated_shares,
-                        trade_size,
+                        "Sizing check | %s | equity=%.2f | target_capital=%.2f | current_price=%.2f | "
+                        "calculated_shares=%.2f | executed_quantity=%d",
+                        symbol, account_equity, target_capital, current_price, calculated_shares, trade_size,
                     )
 
                     await order_manager.execute_trade(symbol, "BUY", trade_size)
@@ -243,6 +373,7 @@ async def main() -> None:
                         "quantity": trade_size,
                         "highest_price_seen": current_price,
                         "initial_atr": current_atr,
+                        "entry_confidence": confidence,
                     }
                     stop_loss = current_price * 0.98 if current_price > 0.0 else "N/A"
                     target_price = current_price * 1.04 if current_price > 0.0 else "N/A"
@@ -273,12 +404,9 @@ async def main() -> None:
                         if loss_pct >= 2.0:
                             sell_quantity = max(1, int(abs(holding_quantity)))
                             logger.warning(
-                                "EMERGENCY STOP-LOSS TRIGGERED for %s | entry_price=%.2f | current_price=%.2f | loss_pct=%.2f | quantity=%d",
-                                symbol,
-                                entry_price,
-                                current_price,
-                                loss_pct,
-                                sell_quantity,
+                                "EMERGENCY STOP-LOSS TRIGGERED for %s | entry_price=%.2f | "
+                                "current_price=%.2f | loss_pct=%.2f | quantity=%d",
+                                symbol, entry_price, current_price, loss_pct, sell_quantity,
                             )
 
                             await order_manager.execute_trade(symbol, "SELL", sell_quantity)
@@ -286,7 +414,9 @@ async def main() -> None:
 
                             stopped_trade_memory = open_trade_memory.pop(symbol_key, None)
                             if stopped_trade_memory:
-                                outcome = _trade_outcome(float(stopped_trade_memory.get("entry_price", 0.0)), current_price)
+                                entry_conf = float(stopped_trade_memory.get("entry_confidence", 0.0))
+                                _record_closed_trade(entry_price, current_price, sell_quantity, entry_conf)
+                                outcome = _trade_outcome(entry_price, current_price)
                                 await news_client.record_trade_memory_async(
                                     symbol=symbol,
                                     technical_context=str(stopped_trade_memory.get("technical_context", technical_context)),
@@ -294,19 +424,16 @@ async def main() -> None:
                                     outcome=outcome,
                                 )
 
-                            stop_loss = "N/A"
-                            target_price = "N/A"
                             await discord_ui.send_execution_alert(
                                 symbol=symbol,
                                 action="SELL",
                                 confidence=confidence,
                                 market_story=technical_context,
                                 entry_price=current_price,
-                                target_price=target_price,
-                                stop_loss=stop_loss,
+                                target_price="N/A",
+                                stop_loss="N/A",
                                 quantity=sell_quantity,
                             )
-
                             logger.info("SELL executed for %s with quantity %d due to emergency stop-loss.", symbol, sell_quantity)
                             return
 
@@ -322,7 +449,10 @@ async def main() -> None:
 
                     trade_memory = open_trade_memory.pop(symbol_key, None)
                     if trade_memory:
-                        outcome = _trade_outcome(float(trade_memory.get("entry_price", 0.0)), current_price)
+                        entry_price_mem = float(trade_memory.get("entry_price", 0.0))
+                        entry_conf = float(trade_memory.get("entry_confidence", 0.0))
+                        _record_closed_trade(entry_price_mem, current_price, sell_quantity, entry_conf)
+                        outcome = _trade_outcome(entry_price_mem, current_price)
                         await news_client.record_trade_memory_async(
                             symbol=symbol,
                             technical_context=str(trade_memory.get("technical_context", technical_context)),
@@ -330,30 +460,45 @@ async def main() -> None:
                             outcome=outcome,
                         )
 
-                    stop_loss = "N/A"
-                    target_price = "N/A"
                     await discord_ui.send_execution_alert(
                         symbol=symbol,
                         action="SELL",
                         confidence=confidence,
                         market_story=technical_context,
                         entry_price=current_price,
-                        target_price=target_price,
-                        stop_loss=stop_loss,
+                        target_price="N/A",
+                        stop_loss="N/A",
                         quantity=sell_quantity,
                     )
-
                     logger.info("SELL executed for %s with quantity %d.", symbol, sell_quantity)
                     return
 
                 logger.info(
                     "No autonomous trade executed for %s | holding=%s | signal=%s",
-                    symbol,
-                    is_holding,
-                    signal_direction,
+                    symbol, is_holding, signal_direction,
                 )
-            
+
             while not shutdown_event.is_set():
+                nonlocal eod_recap_sent_date, eod_liquidation_done_date
+                today_et = _now_et().date()
+
+                # Reset daily stats at the start of each new trading day
+                if eod_recap_sent_date is not None and eod_recap_sent_date != today_et:
+                    daily_closed_trades.clear()
+
+                # End of Day recap — sent once in the 10-minute window after close
+                if _is_just_after_close() and eod_recap_sent_date != today_et:
+                    logger.info("Market closed. Sending EoD recap.")
+                    stats = _compute_eod_stats(daily_closed_trades, order_manager.get_account_equity())
+                    await discord_ui.send_eod_recap(stats)
+                    eod_recap_sent_date = today_et
+
+                # Pre-close forced liquidation — clear all positions 10 min before close
+                if _is_pre_close() and eod_liquidation_done_date != today_et:
+                    logger.info("Pre-close window reached. Liquidating all positions.")
+                    await liquidate_all_positions(reason="End-of-Day")
+                    eod_liquidation_done_date = today_et
+
                 for symbol in settings["tickers"]:
                     technical_context, current_price, current_atr = await _build_trade_snapshot(symbol)
 
@@ -361,6 +506,7 @@ async def main() -> None:
                     is_holding = holding_quantity != 0.0
                     symbol_key = symbol.upper().strip()
 
+                    # ATR trailing stop and take-profit (active regardless of time, protect open capital)
                     if is_holding:
                         trade_memory = open_trade_memory.get(symbol_key)
                         if trade_memory is not None:
@@ -383,6 +529,8 @@ async def main() -> None:
                             except (TypeError, ValueError):
                                 initial_atr = 0.0
 
+                            entry_conf = float(trade_memory.get("entry_confidence", 0.0))
+
                             trailing_stop_level = highest_price_seen - (2 * current_atr)
                             if current_price > 0.0 and current_price <= trailing_stop_level:
                                 sell_quantity = max(1, int(abs(holding_quantity)))
@@ -393,7 +541,8 @@ async def main() -> None:
 
                                 stopped_trade_memory = open_trade_memory.pop(symbol_key, None)
                                 if stopped_trade_memory:
-                                    outcome = _trade_outcome(float(stopped_trade_memory.get("entry_price", 0.0)), current_price)
+                                    _record_closed_trade(entry_price, current_price, sell_quantity, entry_conf)
+                                    outcome = _trade_outcome(entry_price, current_price)
                                     await news_client.record_trade_memory_async(
                                         symbol=symbol,
                                         technical_context=str(stopped_trade_memory.get("technical_context", technical_context)),
@@ -411,7 +560,6 @@ async def main() -> None:
                                     stop_loss=trailing_stop_level,
                                     quantity=sell_quantity,
                                 )
-
                                 logger.info("SELL executed for %s with quantity %d due to ATR trailing stop.", symbol, sell_quantity)
                                 continue
 
@@ -425,7 +573,8 @@ async def main() -> None:
 
                                 stopped_trade_memory = open_trade_memory.pop(symbol_key, None)
                                 if stopped_trade_memory:
-                                    outcome = _trade_outcome(float(stopped_trade_memory.get("entry_price", 0.0)), current_price)
+                                    _record_closed_trade(entry_price, current_price, sell_quantity, entry_conf)
+                                    outcome = _trade_outcome(entry_price, current_price)
                                     await news_client.record_trade_memory_async(
                                         symbol=symbol,
                                         technical_context=str(stopped_trade_memory.get("technical_context", technical_context)),
@@ -443,12 +592,12 @@ async def main() -> None:
                                     stop_loss="N/A",
                                     quantity=sell_quantity,
                                 )
-
                                 logger.info("SELL executed for %s with quantity %d due to take profit.", symbol, sell_quantity)
                                 continue
 
+                    # News evaluation runs continuously (pre-market builds context, only executes when open)
                     news_items = await news_client.fetch_latest_news(symbol, technical_context=technical_context)
-                    
+
                     for news_item in news_items:
                         logger.info(
                             "NEWS ALERT [%s] | AI Sentiment: %.2f | %s",
@@ -476,7 +625,7 @@ async def main() -> None:
                             confidence=confidence,
                         )
                         break
-                
+
                 try:
                     await asyncio.wait_for(shutdown_event.wait(), timeout=60)
                 except asyncio.TimeoutError:
@@ -498,16 +647,14 @@ async def main() -> None:
 
                 logger.warning(
                     "IBKR startup handshake failed (%d/%d): %s. Retrying in 5 seconds.",
-                    attempt,
-                    startup_attempts,
-                    exc,
+                    attempt, startup_attempts, exc,
                 )
                 await asyncio.sleep(5)
 
         config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="warning")
         server = uvicorn.Server(config)
         server_task = asyncio.create_task(server.serve())
-        
+
         await shutdown_event.wait()
 
     except asyncio.CancelledError:
@@ -523,7 +670,7 @@ async def main() -> None:
                 await asyncio.wait_for(server_task, timeout=5)
         with contextlib.suppress(Exception):
             await discord_ui.close()
-        order_manager.close() # Clean up order event listeners
+        order_manager.close()
         client.disconnect()
 
 
@@ -531,6 +678,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        # Catch interrupts outside asyncio.
         logging.getLogger("Main").info("Stopped manually.")
         sys.exit(0)

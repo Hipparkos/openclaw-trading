@@ -73,6 +73,20 @@ class OrderManager:
             self.logger.exception("Failed to place order for %s: %s", symbol, exc)
             raise
 
+    def get_all_positions(self) -> dict[str, float]:
+        positions: dict[str, float] = {}
+        for position in self.ib.portfolio():
+            symbol = getattr(position.contract, "symbol", "")
+            if not symbol:
+                continue
+            try:
+                qty = float(position.position)
+            except (TypeError, ValueError):
+                qty = 0.0
+            if qty != 0.0:
+                positions[symbol] = qty
+        return positions
+
     def get_position(self, symbol: str) -> float:
         for position in self.ib.portfolio():
             if getattr(position.contract, "symbol", "") == symbol:

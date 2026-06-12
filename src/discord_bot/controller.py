@@ -81,6 +81,35 @@ class TradingCommands(commands.Cog):
             embed = discord.Embed(title="Account Equity", description="Unable to retrieve account equity right now.", color=0x992D22)
             await ctx.send(embed=embed)
 
+    @commands.command(name="sellall")
+    async def sellall(self, ctx):
+        if not callable(getattr(self.bot, "on_manual_sell", None)):
+            await ctx.send("Manual liquidation is not available right now.")
+            return
+
+        embed = discord.Embed(
+            title="MANUAL LIQUIDATION INITIATED",
+            description="Closing all open positions...",
+            color=0xFF6600,
+        )
+        await ctx.send(embed=embed)
+
+        try:
+            results = await self.bot.on_manual_sell()
+            if results:
+                embed = discord.Embed(title="Liquidation Complete", color=0xFF6600)
+                embed.description = "\n".join(results)
+            else:
+                embed = discord.Embed(
+                    title="No Open Positions",
+                    description="Portfolio is already flat.",
+                    color=0x2F3136,
+                )
+            await ctx.send(embed=embed)
+        except Exception as exc:
+            logging.error("!sellall failed: %s", exc)
+            await ctx.send("Liquidation encountered an error. Check the logs.")
+
     @commands.command(name="status")
     async def status(self, ctx):
         try:
@@ -101,9 +130,10 @@ class TradingCommands(commands.Cog):
 class OpenClawDiscord(commands.Bot):
     def __init__(self, order_manager):
         intents = discord.Intents.default()
-        intents.message_content = True  
+        intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
         self.order_manager = order_manager
+        self.on_manual_sell = None  # set by main after startup
         
         try:
             self.channel_id = int(os.getenv("DISCORD_CHANNEL_ID", 0))
@@ -153,6 +183,42 @@ class OpenClawDiscord(commands.Bot):
         view = TradeApprovalView(self.order_manager, symbol, side)
         
         await channel.send(embed=embed, view=view)
+
+    async def send_eod_recap(self, stats: dict) -> None:
+        channel = await self._get_target_channel()
+        if channel is None:
+            logging.error("EoD recap suppressed: Discord channel could not be resolved.")
+            return
+
+        net_pnl = stats.get("net_pnl", 0.0)
+        pnl_sign = "+" if net_pnl >= 0 else ""
+        color = 0x00FF00 if net_pnl >= 0 else 0xFF0000
+
+        embed = discord.Embed(title="End of Day Recap", color=color)
+
+        embed.add_field(name="Net P&L", value=f"${pnl_sign}{net_pnl:,.2f}", inline=True)
+        embed.add_field(name="Account Liquidity", value=f"${stats.get('account_equity', 0.0):,.2f}", inline=True)
+        embed.add_field(name="​", value="​", inline=True)
+
+        total = stats.get("total_trades", 0)
+        wins = stats.get("wins", 0)
+        win_ratio = (wins / total * 100) if total > 0 else 0.0
+        embed.add_field(name="Total Trades", value=str(total), inline=True)
+        embed.add_field(name="Win Ratio", value=f"{win_ratio:.1f}%", inline=True)
+        embed.add_field(name="​", value="​", inline=True)
+
+        embed.add_field(name="Avg Win", value=f"${stats.get('avg_win', 0.0):,.2f}", inline=True)
+        embed.add_field(name="Avg Loss", value=f"${stats.get('avg_loss', 0.0):,.2f}", inline=True)
+        embed.add_field(name="​", value="​", inline=True)
+
+        embed.add_field(name="Largest Win", value=f"${stats.get('largest_win', 0.0):,.2f}", inline=True)
+        embed.add_field(name="Largest Loss", value=f"${stats.get('largest_loss', 0.0):,.2f}", inline=True)
+        embed.add_field(name="​", value="​", inline=True)
+
+        embed.add_field(name="AI Confidence — Wins", value=f"{stats.get('avg_confidence_wins', 0.0):.2f}", inline=True)
+        embed.add_field(name="AI Confidence — Losses", value=f"{stats.get('avg_confidence_losses', 0.0):.2f}", inline=True)
+
+        await channel.send(embed=embed)
 
     async def send_execution_alert(self, symbol, action, confidence, market_story, entry_price, target_price, stop_loss, quantity):
         if not self.channel_id:
