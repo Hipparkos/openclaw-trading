@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
+import numpy as np
 import yfinance as yf
 
 from data.data_models import NewsData
@@ -32,13 +33,19 @@ class NewsClient:
                     technical_context TEXT NOT NULL,
                     prediction TEXT NOT NULL,
                     outcome TEXT NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    embedding BLOB
                 )
                 """
             )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_trade_memory_symbol_created ON trade_memory(symbol, created_at DESC)"
             )
+            # Safe migration: add embedding column to existing databases
+            try:
+                connection.execute("ALTER TABLE trade_memory ADD COLUMN embedding BLOB")
+            except Exception:
+                pass  # Column already exists
 
     def _memory_connection(self) -> sqlite3.Connection:
         return sqlite3.connect(self.memory_db_path)
@@ -54,12 +61,41 @@ class NewsClient:
             return cleaned
         return f"{cleaned[: limit - 3]}..."
 
-    def record_trade_memory(self, symbol: str, technical_context: str, prediction: str, outcome: str) -> None:
+    @staticmethod
+    def _cosine_similarity(a: bytes, b: bytes) -> float:
+        va = np.frombuffer(a, dtype=np.float32)
+        vb = np.frombuffer(b, dtype=np.float32)
+        norm = np.linalg.norm(va) * np.linalg.norm(vb)
+        return float(np.dot(va, vb) / norm) if norm > 0.0 else 0.0
+
+    async def _get_embedding(self, text: str, session: aiohttp.ClientSession) -> bytes | None:
+        url = "http://openclaw_ollama:11434/api/embeddings"
+        payload = {"model": "nomic-embed-text", "prompt": text}
+        try:
+            async with session.post(url, json=payload) as response:
+                response.raise_for_status()
+                data = await response.json(content_type=None)
+            vector = data.get("embedding")
+            if not vector:
+                return None
+            return np.array(vector, dtype=np.float32).tobytes()
+        except Exception as exc:
+            self.logger.warning("Failed to fetch embedding: %s", exc)
+            return None
+
+    def record_trade_memory(
+        self,
+        symbol: str,
+        technical_context: str,
+        prediction: str,
+        outcome: str,
+        embedding_bytes: bytes | None = None,
+    ) -> None:
         with self._memory_db_lock, self._memory_connection() as connection:
             connection.execute(
                 """
-                INSERT INTO trade_memory (symbol, technical_context, prediction, outcome, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO trade_memory (symbol, technical_context, prediction, outcome, created_at, embedding)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     symbol,
@@ -67,14 +103,37 @@ class NewsClient:
                     prediction,
                     outcome,
                     datetime.now(timezone.utc).isoformat(),
+                    embedding_bytes,
                 ),
             )
 
-    def _fetch_live_memory_injection(self, symbol: str, technical_context: str, headline: str) -> str:
+    async def record_trade_memory_async(
+        self,
+        symbol: str,
+        technical_context: str,
+        prediction: str,
+        outcome: str,
+    ) -> None:
+        embedding_bytes: bytes | None = None
+        try:
+            timeout = aiohttp.ClientTimeout(total=10, connect=5, sock_read=5)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                embedding_bytes = await self._get_embedding(technical_context, session)
+        except Exception as exc:
+            self.logger.warning("Embedding fetch skipped during trade recording: %s", exc)
+        self.record_trade_memory(symbol, technical_context, prediction, outcome, embedding_bytes)
+
+    def _fetch_live_memory_injection(
+        self,
+        symbol: str,
+        technical_context: str,
+        headline: str,
+        query_embedding: bytes | None = None,
+    ) -> str:
         with self._memory_db_lock, self._memory_connection() as connection:
             rows = connection.execute(
                 """
-                SELECT technical_context, prediction, outcome, created_at
+                SELECT technical_context, prediction, outcome, created_at, embedding
                 FROM trade_memory
                 WHERE symbol = ?
                 ORDER BY created_at DESC
@@ -86,12 +145,27 @@ class NewsClient:
         if not rows:
             return ""
 
-        current_tokens = self._tokenize(f"{technical_context} {headline}")
-        scored_rows: list[tuple[int, tuple[Any, ...]]] = []
-        for row in rows:
-            row_tokens = self._tokenize(str(row[0]))
-            overlap = len(current_tokens & row_tokens) if current_tokens and row_tokens else 0
-            scored_rows.append((overlap, row))
+        scored_rows: list[tuple[float, tuple[Any, ...]]] = []
+
+        if query_embedding is not None:
+            # Semantic scoring: cosine similarity for rows that have embeddings,
+            # token-overlap fallback for legacy rows without.
+            current_tokens = self._tokenize(f"{technical_context} {headline}")
+            for row in rows:
+                stored_embedding = row[4]
+                if stored_embedding is not None:
+                    score = self._cosine_similarity(query_embedding, stored_embedding)
+                else:
+                    row_tokens = self._tokenize(str(row[0]))
+                    overlap = len(current_tokens & row_tokens) if current_tokens and row_tokens else 0
+                    score = overlap / max(len(current_tokens), 1) * 0.5  # Normalise to <1 so semantic rows rank higher
+                scored_rows.append((score, row))
+        else:
+            current_tokens = self._tokenize(f"{technical_context} {headline}")
+            for row in rows:
+                row_tokens = self._tokenize(str(row[0]))
+                overlap = len(current_tokens & row_tokens) if current_tokens and row_tokens else 0
+                scored_rows.append((float(overlap), row))
 
         scored_rows.sort(key=lambda item: (item[0], str(item[1][3])), reverse=True)
 
@@ -103,7 +177,7 @@ class NewsClient:
             return ""
 
         memory_lines = ["LIVE MEMORY INJECTION:"]
-        for technical_context_row, prediction, outcome, created_at in selected_rows:
+        for technical_context_row, prediction, outcome, created_at, _embedding in selected_rows:
             memory_lines.append(
                 "- Recent similar setup on {symbol} at {created_at}: predicted {prediction}, outcome {outcome}. Context: {context}".format(
                     symbol=symbol,
@@ -157,9 +231,9 @@ class NewsClient:
             # Refactored string matching to prevent markdown parser breaks
             marker = "```"
             json_payload = re.sub(
-                rf"^{marker}(?:json)?\s*|\s*{marker}$", 
-                "", 
-                json_payload, 
+                rf"^{marker}(?:json)?\s*|\s*{marker}$",
+                "",
+                json_payload,
                 flags=re.IGNORECASE | re.DOTALL
             ).strip()
 
@@ -215,11 +289,15 @@ class NewsClient:
         url = "http://openclaw_ollama:11434/api/chat"
         self.logger.info("Requesting OpenClaw pattern evaluation for %s", ticker)
 
+        query_text = f"{technical_context} {headline}"
+        query_embedding = await self._get_embedding(query_text, session)
+
         memory_injection = await asyncio.to_thread(
             self._fetch_live_memory_injection,
             ticker,
             technical_context,
             headline,
+            query_embedding,
         )
 
         system_prompt = (
@@ -274,7 +352,7 @@ class NewsClient:
             # Updated parsing path matching standard Ollama /api/chat layout
             message_content = data.get("message", {}).get("content", "")
             raw_response = str(message_content).strip()
-            
+
             prediction = self._parse_openclaw_response(raw_response)
             self.logger.info(
                 "OpenClaw prediction | ticker=%s | direction=%s | confidence=%.2f",
@@ -343,7 +421,7 @@ class NewsClient:
                 session=session, ticker="UNKNOWN", technical_context="", headline=headline
             )
             return self._prediction_to_score(prediction)
-            
+
         timeout = aiohttp.ClientTimeout(total=10, connect=5, sock_read=5)
         async with aiohttp.ClientSession(timeout=timeout) as standalone_session:
             prediction = await self.get_openclaw_prediction(
@@ -370,7 +448,7 @@ class NewsClient:
             # Step 1: Prepare tasks to fetch predictions concurrently via asyncio.gather
             tasks = []
             valid_items = []
-            
+
             for item in news_items[:3]:
                 headline = self._first_nonempty_text(
                     item, ("title", "headline", "summary", "description", "content")
@@ -378,7 +456,7 @@ class NewsClient:
                 if not headline:
                     self.logger.warning("Skipping Yahoo news item without headline (id=%s)", item.get("id", "unknown"))
                     continue
-                
+
                 valid_items.append((item, headline))
                 tasks.append(
                     self.get_openclaw_prediction(

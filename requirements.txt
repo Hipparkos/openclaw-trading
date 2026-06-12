@@ -10,3 +10,4 @@ uvicorn>=0.30.0,<1.0.0
 pydantic>=2.8.0,<3.0.0
 yfinance>=0.2.37
 discord.py==2.3.2
+numpy>=1.26.0,<3.0.0

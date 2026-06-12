@@ -287,7 +287,7 @@ async def main() -> None:
                             stopped_trade_memory = open_trade_memory.pop(symbol_key, None)
                             if stopped_trade_memory:
                                 outcome = _trade_outcome(float(stopped_trade_memory.get("entry_price", 0.0)), current_price)
-                                news_client.record_trade_memory(
+                                await news_client.record_trade_memory_async(
                                     symbol=symbol,
                                     technical_context=str(stopped_trade_memory.get("technical_context", technical_context)),
                                     prediction=str(stopped_trade_memory.get("prediction", signal_direction)),
@@ -323,7 +323,7 @@ async def main() -> None:
                     trade_memory = open_trade_memory.pop(symbol_key, None)
                     if trade_memory:
                         outcome = _trade_outcome(float(trade_memory.get("entry_price", 0.0)), current_price)
-                        news_client.record_trade_memory(
+                        await news_client.record_trade_memory_async(
                             symbol=symbol,
                             technical_context=str(trade_memory.get("technical_context", technical_context)),
                             prediction=str(trade_memory.get("prediction", signal_direction)),
@@ -394,7 +394,7 @@ async def main() -> None:
                                 stopped_trade_memory = open_trade_memory.pop(symbol_key, None)
                                 if stopped_trade_memory:
                                     outcome = _trade_outcome(float(stopped_trade_memory.get("entry_price", 0.0)), current_price)
-                                    news_client.record_trade_memory(
+                                    await news_client.record_trade_memory_async(
                                         symbol=symbol,
                                         technical_context=str(stopped_trade_memory.get("technical_context", technical_context)),
                                         prediction=str(stopped_trade_memory.get("prediction", "BULLISH")),
@@ -426,7 +426,7 @@ async def main() -> None:
                                 stopped_trade_memory = open_trade_memory.pop(symbol_key, None)
                                 if stopped_trade_memory:
                                     outcome = _trade_outcome(float(stopped_trade_memory.get("entry_price", 0.0)), current_price)
-                                    news_client.record_trade_memory(
+                                    await news_client.record_trade_memory_async(
                                         symbol=symbol,
                                         technical_context=str(stopped_trade_memory.get("technical_context", technical_context)),
                                         prediction=str(stopped_trade_memory.get("prediction", "BULLISH")),

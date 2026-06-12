@@ -38,6 +38,11 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     restart: unless-stopped
+    entrypoint: >
+      sh -c "ollama serve &
+             sleep 5 &&
+             ollama pull nomic-embed-text &&
+             wait"
 
 volumes:
   ollama_data:
