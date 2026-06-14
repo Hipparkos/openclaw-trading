@@ -188,6 +188,14 @@ async def main() -> None:
 
     try:
         settings = load_settings(settings_path)
+        screener = VolumeGainerScreener()
+        screened_tickers = await screener.load_cached_symbols()
+
+        if screened_tickers:
+            settings["tickers"] = screened_tickers
+            logger.info(f"Using screened tickers: {screened_tickers}")
+        else:
+            logger.warning(f"Screener failed, using fallback: {settings.get('tickers', [])}")
     except ConfigurationError as e:
         logger.error(e)
         sys.exit(1)

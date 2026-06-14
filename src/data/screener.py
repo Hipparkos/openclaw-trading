@@ -1,12 +1,11 @@
 import asyncio
 import logging
+import json
 from datetime import datetime
 from pathlib import Path
-import json
 from typing import List
 
-import requests
-from bs4 import BeautifulSoup
+import yahoo_fin.stock_info as si
 import yfinance as yf
 
 
@@ -19,11 +18,17 @@ class VolumeGainerScreener:
     async def screen_volume_gainers(self) -> List[str]:
         self.logger.info("Starting volume gainer screener...")
 
-        symbols = await self._scrape_finviz_gainers()
-        self.logger.info(f"Found {len(symbols)} candidates from Finviz")
+        try:
+            active_df = await asyncio.to_thread(si.get_day_most_active)
+            symbols = active_df["Symbol"].head(20).tolist()
+            self.logger.info(f"Found {len(symbols)} most active stocks from Yahoo Finance")
+        except Exception as e:
+            self.logger.error(f"Failed to fetch most active stocks: {e}")
+            return []
 
+        # Validate: price range, volume, liquidity
         validated = []
-        for symbol in symbols[:20]:
+        for symbol in symbols:
             if await self._is_daytrading_suitable(symbol):
                 validated.append(symbol)
                 if len(validated) >= 10:
@@ -40,43 +45,7 @@ class VolumeGainerScreener:
 
         return validated
 
-    async def _scrape_finviz_gainers(self) -> List[str]:
-        try:
-            url = (
-                "https://finviz.com/screener.ashx?"
-                "v=111&"
-                "f=sh_price_5to1000,sh_avgvol_o500k&"
-                "o=-volume"
-            )
-
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-            response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
-
-            soup = BeautifulSoup(response.content, "html.parser")
-
-            table = soup.find("table", {"class": "screener_table"})
-            if not table:
-                self.logger.warning("Could not find screener table on Finviz")
-                return []
-
-            symbols = []
-            for row in table.find_all("tr")[1:]:
-                cells = row.find_all("td")
-                if len(cells) > 1:
-                    symbol = cells[1].get_text(strip=True)
-                    if symbol and symbol.isalpha() and len(symbol) <= 5:
-                        symbols.append(symbol)
-
-            self.logger.info(f"Scraped {len(symbols)} symbols from Finviz")
-            return symbols[:20]
-
-        except Exception as e:
-            self.logger.error(f"Finviz scrape failed: {e}")
-            return []
-
     async def _is_daytrading_suitable(self, symbol: str) -> bool:
-        """Validate stock is suitable for day trading."""
         try:
             ticker = await asyncio.to_thread(yf.Ticker, symbol)
             info = await asyncio.to_thread(self._get_ticker_info, ticker)
@@ -87,7 +56,10 @@ class VolumeGainerScreener:
             market_cap = info.get("marketCap")
 
             if not all([price, volume, float_shares, market_cap]):
-                self.logger.debug(f"Missing data for {symbol}: price={price}, vol={volume}, float={float_shares}, mcap={market_cap}")
+                self.logger.debug(
+                    f"Missing data for {symbol}: price={price}, vol={volume}, "
+                    f"float={float_shares}, mcap={market_cap}"
+                )
                 return False
 
             price = float(price)
@@ -108,7 +80,10 @@ class VolumeGainerScreener:
                 self.logger.debug(f"{symbol}: market cap ${market_cap:,} too low")
                 return False
 
-            self.logger.info(f"✓ {symbol} | Price ${price:.2f} | Volume {volume:,} | Float {float_shares:,} | MCap ${market_cap:,.0f}")
+            self.logger.info(
+                f"✓ {symbol} | Price ${price:.2f} | Volume {volume:,} | "
+                f"Float {float_shares:,} | MCap ${market_cap:,.0f}"
+            )
             return True
 
         except Exception as e:
