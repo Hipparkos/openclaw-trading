@@ -11,4 +11,4 @@ pydantic>=2.8.0,<3.0.0
 yfinance>=0.2.37
 discord.py==2.3.2
 numpy>=1.26.0,<3.0.0
-yahoo_fin>=0.18.13
+yahoo_fin>=0.8.9
