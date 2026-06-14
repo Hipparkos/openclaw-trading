@@ -63,8 +63,8 @@ class VolumeGainerScreener:
             symbols = []
             for row in table.find_all("tr")[1:]:
                 cells = row.find_all("td")
-                if len(cells) > 0:
-                    symbol = cells[0].get_text(strip=True)
+                if len(cells) > 1:
+                    symbol = cells[1].get_text(strip=True)
                     if symbol and symbol.isalpha() and len(symbol) <= 5:
                         symbols.append(symbol)
 
