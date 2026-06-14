@@ -7,6 +7,7 @@ import sys
 import math
 from datetime import datetime, timedelta, timezone, date
 from logging.handlers import RotatingFileHandler
+from data.screener import VolumeGainerScreener
 from execution.order_manager import OrderManager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -190,6 +191,16 @@ async def main() -> None:
     except ConfigurationError as e:
         logger.error(e)
         sys.exit(1)
+        
+    screener = VolumeGainerScreener()
+    tickers = await screener.load_cached_symbols()
+
+    if not tickers:
+        logger.error("Screener returned no symbols. Using fallback settings.yaml")
+        tickers = settings.get("tickers", [])
+    else:
+        settings["tickers"] = tickers
+        logger.info(f"Today's screened tickers: {tickers}")
 
     client = IBKRClient(settings)
     order_manager = OrderManager(client)
