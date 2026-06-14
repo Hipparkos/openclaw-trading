@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   ib-gateway:
     image: ghcr.io/gnzsnz/ib-gateway:stable
