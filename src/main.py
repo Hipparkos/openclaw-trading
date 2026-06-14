@@ -308,15 +308,26 @@ async def main() -> None:
                     return "Insufficient 5-minute market data yet.", 0.0, 0.0
 
                 indicator_calculator = IndicatorCalculator()
-                df = await asyncio.to_thread(indicator_calculator.calculate_all, bars_5m)
-                if df.empty:
+                df_5m = await asyncio.to_thread(indicator_calculator.calculate_all, bars_5m)
+                if df_5m.empty:
                     return "Technical dataframe is empty.", 0.0, 0.0
 
                 strategy_engine = StrategyEngine()
-                technical_context = await asyncio.to_thread(strategy_engine.evaluate_signals, df)
+                technical_5m = await asyncio.to_thread(strategy_engine.evaluate_signals, df_5m)
+
+                # Evaluate 1-hour trend context
+                bars_1h = list(client.data_buffer.get(symbol, {}).get("1 hour", []))
+                hourly_trend = ""
+                if len(bars_1h) >= 2:
+                    df_1h = await asyncio.to_thread(indicator_calculator.calculate_all, bars_1h)
+                    if not df_1h.empty:
+                        hourly_trend = await asyncio.to_thread(strategy_engine.evaluate_hourly_trend, df_1h)
+
+                # Combine 1h trend + 5m signals
+                technical_context = f"{hourly_trend} | 5m: {technical_5m}" if hourly_trend else technical_5m
 
                 current_price = 0.0
-                latest_close = df.iloc[-1].get("close")
+                latest_close = df_5m.iloc[-1].get("close")
                 if latest_close is not None and latest_close == latest_close:
                     try:
                         current_price = float(latest_close)
@@ -324,7 +335,7 @@ async def main() -> None:
                         current_price = 0.0
 
                 current_atr = 0.0
-                latest_atr = df.iloc[-1].get("atr_14", 0.0)
+                latest_atr = df_5m.iloc[-1].get("atr_14", 0.0)
                 try:
                     current_atr = float(latest_atr)
                     if not math.isfinite(current_atr):

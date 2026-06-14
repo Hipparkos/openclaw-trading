@@ -162,7 +162,7 @@ class IBKRClient:
         self.data_buffer.setdefault(symbol, {})
 
         bar_tasks = []
-        for bar_size in ("1 min", "5 mins", "15 mins"):
+        for bar_size in ("1 min", "5 mins", "15 mins", "1 hour"):
             bar_tasks.append(self._request_historical_bars(contract, symbol, bar_size))
             
         await asyncio.gather(*bar_tasks)
