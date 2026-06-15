@@ -308,8 +308,8 @@ class NewsClient:
             "1. CONTEXT: Evaluate the 'Technical Setup' (moving averages, volume, trend structure).\n"
             "2. CATALYST: Evaluate the 'Headline' for actionable institutional impact (earnings, macro shifts, supply chain).\n"
             "3. ALIGNMENT LOGIC:\n"
-            "   - Synergy: If the catalyst confirms the technical trend -> High Confidence (0.7 to 1.0).\n"
-            "   - Conflict: If the catalyst contradicts the technical trend -> Low Confidence (0.1 to 0.4).\n"
+            "   - Synergy: rate conviction 0.5 to 1.0 based on how clearly catalyst confirms trend. \n"
+            "   - Conflict: rate conviction 0.0 to 0.5 based on how sharply catalyst contradicts trend.\n"
             "   - Noise: If the headline is irrelevant, vague, or non-actionable -> NEUTRAL (0.0).\n\n"
             "### STRICT OUTPUT PROTOCOL\n"
             "You are a programmatic endpoint. You must output ONLY raw, unformatted JSON. "
@@ -340,7 +340,7 @@ class NewsClient:
             ],
             "stream": False,
             "options": {
-                "temperature": 0.2,
+                "temperature": 0.4,
             },
         }
 
