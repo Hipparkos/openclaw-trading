@@ -111,6 +111,65 @@ class TradingCommands(commands.Cog):
             logging.error("!sellall failed: %s", exc)
             await ctx.send("Liquidation encountered an error. Check the logs.")
 
+    @commands.command(name="add")
+    async def add_ticker(self, ctx, ticker: str = None):
+        if not self.bot.settings:
+            await ctx.send("Bot settings not available yet.")
+            return
+        if not ticker:
+            await ctx.send("Usage: `!add TICKER` — e.g. `!add AAPL`")
+            return
+
+        symbol = ticker.upper().strip()
+        tickers: list = self.bot.settings.setdefault("tickers", [])
+
+        if symbol in tickers:
+            embed = discord.Embed(
+                title="Already Watching",
+                description=f"`{symbol}` is already on the watchlist.",
+                color=0xAAAAAA,
+            )
+        else:
+            tickers.append(symbol)
+            embed = discord.Embed(
+                title="Ticker Added",
+                description=f"`{symbol}` added to the watchlist.",
+                color=0x00FF00,
+            )
+            embed.add_field(name="Current Watchlist", value=" | ".join(tickers), inline=False)
+
+        await ctx.send(embed=embed)
+
+    @commands.command(name="remove")
+    async def remove_ticker(self, ctx, ticker: str = None):
+        if not self.bot.settings:
+            await ctx.send("Bot settings not available yet.")
+            return
+        if not ticker:
+            await ctx.send("Usage: `!remove TICKER` — e.g. `!remove AAPL`")
+            return
+
+        symbol = ticker.upper().strip()
+        tickers: list = self.bot.settings.get("tickers", [])
+
+        if symbol not in tickers:
+            embed = discord.Embed(
+                title="Not Found",
+                description=f"`{symbol}` is not on the watchlist.",
+                color=0xAAAAAA,
+            )
+        else:
+            tickers.remove(symbol)
+            embed = discord.Embed(
+                title="Ticker Removed",
+                description=f"`{symbol}` removed from the watchlist.",
+                color=0xFF6600,
+            )
+            remaining = " | ".join(tickers) if tickers else "_(empty)_"
+            embed.add_field(name="Current Watchlist", value=remaining, inline=False)
+
+        await ctx.send(embed=embed)
+
     @commands.command(name="status")
     async def status(self, ctx):
         try:
