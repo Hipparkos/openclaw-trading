@@ -60,11 +60,16 @@ class StrategyEngine:
                     return value
             return None
 
+        # Detect Bollinger Band columns dynamically — pandas_ta naming varies by version
+        bbl_col = next((c for c in df.columns if c.startswith("BBL_")), None)
+        bbu_col = next((c for c in df.columns if c.startswith("BBU_")), None)
+
         return (
             f"The SMA_5 is {_format_value(latest_row.get('sma_5'))}. "
             f"The Close is {_format_value(latest_row.get('close'))}. "
             f"The RSI_14 is {_format_value(latest_row.get('rsi_14'))}. "
             f"The VWAP is {_format_value(_get_value('vwap'))}. "
-            f"The Bollinger Bands are lower {_format_value(_get_value('BBL_20_2.0', 'BBL_20_2'))} and upper {_format_value(_get_value('BBU_20_2.0', 'BBU_20_2'))}. "
+            f"The Bollinger Bands are lower {_format_value(latest_row.get(bbl_col)) if bbl_col else 'N/A'} "
+            f"and upper {_format_value(latest_row.get(bbu_col)) if bbu_col else 'N/A'}. "
             f"The MACD is {_format_value(latest_row.get('MACD_6_20_9'))} and the Signal is {_format_value(latest_row.get('MACDs_6_20_9'))}."
         )

@@ -260,20 +260,7 @@ async def main() -> None:
                 return 0.0
         return 0.0
 
-    def _get_target_stop_for_direction(entry_price: float, is_long: bool) -> tuple:
-        """Calculate target and stop prices based on position direction.
-
-        Long: target = entry * 1.04 (sell higher), stop = entry * 0.98 (sell lower)
-        Short: target = entry * 0.96 (buy lower), stop = entry * 1.02 (buy higher)
-        """
-        if entry_price <= 0.0:
-            return "N/A", "N/A"
-        if is_long:
-            return entry_price * 1.04, entry_price * 0.98
-        else:
-            return entry_price * 0.96, entry_price * 1.02
-
-    async def liquidate_all_positions(reason: str = "Manual") -> List[str]:
+async def liquidate_all_positions(reason: str = "Manual") -> List[str]:
         results: List[str] = []
         now = datetime.now(timezone.utc)
         for symbol, quantity in order_manager.get_all_positions().items():
@@ -286,8 +273,11 @@ async def main() -> None:
             last_sell_time[symbol_key] = now
 
             trade_memory = open_trade_memory.pop(symbol_key, None)
+            entry_price = 0.0
+            entry_time_mem = None
             if trade_memory:
                 entry_price = float(trade_memory.get("entry_price", 0.0))
+                entry_time_mem = trade_memory.get("entry_time")
                 exit_price = _get_last_price(symbol) or entry_price
                 confidence = float(trade_memory.get("entry_confidence", 0.0))
                 _record_closed_trade(entry_price, exit_price, close_qty, confidence)
@@ -304,6 +294,20 @@ async def main() -> None:
                     prediction=str(trade_memory.get("prediction", "BULLISH")),
                     outcome=f"{outcome_pct:+.2f}% ({outcome_label})",
                 )
+            else:
+                exit_price = _get_last_price(symbol) or 0.0
+
+            exit_reason = "End-of-day close" if reason == "End-of-Day" else "Manual close (!closeall)"
+            await discord_ui.send_close_alert(
+                symbol=symbol,
+                is_long=is_long,
+                entry_price=entry_price,
+                exit_price=exit_price,
+                quantity=close_qty,
+                entry_time=entry_time_mem,
+                exit_reason=exit_reason,
+                market_story=str(trade_memory.get("technical_context", "")) if trade_memory else "",
+            )
             results.append(f"{symbol}: {action} {close_qty} shares [{reason}]")
             logger.info("Closed %s x%d via %s — reason: %s", symbol, close_qty, action, reason)
         return results
@@ -465,6 +469,7 @@ async def main() -> None:
                             last_sell_time[symbol_key] = now
 
                             stopped_trade_memory = open_trade_memory.pop(symbol_key, None)
+                            entry_time_mem = stopped_trade_memory.get("entry_time") if stopped_trade_memory else None
                             if stopped_trade_memory:
                                 entry_conf = float(stopped_trade_memory.get("entry_confidence", 0.0))
                                 _record_closed_trade(entry_price, current_price, sell_quantity, entry_conf)
@@ -477,20 +482,17 @@ async def main() -> None:
                                 )
 
                             is_long = holding_quantity > 0
-                            action = "SELL" if is_long else "BUY"
-                            target_price, stop_loss = _get_target_stop_for_direction(entry_price, is_long)
-
-                            await discord_ui.send_execution_alert(
+                            await discord_ui.send_close_alert(
                                 symbol=symbol,
-                                action=action,
-                                confidence=confidence,
-                                market_story=technical_context,
-                                entry_price=current_price,
-                                target_price=target_price,
-                                stop_loss=stop_loss,
+                                is_long=is_long,
+                                entry_price=entry_price,
+                                exit_price=current_price,
                                 quantity=sell_quantity,
+                                entry_time=entry_time_mem,
+                                exit_reason="2% stop-loss triggered",
+                                market_story=technical_context,
                             )
-                            logger.info("%s executed for %s with quantity %d due to emergency stop-loss.", action, symbol, sell_quantity)
+                            logger.info("Close executed for %s x%d — 2%% stop-loss.", symbol, sell_quantity)
                             return
 
                 if signal_direction == "BEARISH" and is_holding:
@@ -505,8 +507,10 @@ async def main() -> None:
 
                     trade_memory = open_trade_memory.pop(symbol_key, None)
                     entry_price_mem = 0.0
+                    entry_time_mem = None
                     if trade_memory:
                         entry_price_mem = float(trade_memory.get("entry_price", 0.0))
+                        entry_time_mem = trade_memory.get("entry_time")
                         entry_conf = float(trade_memory.get("entry_confidence", 0.0))
                         _record_closed_trade(entry_price_mem, current_price, sell_quantity, entry_conf)
                         outcome = _trade_outcome(entry_price_mem, current_price)
@@ -518,20 +522,17 @@ async def main() -> None:
                         )
 
                     is_long = holding_quantity > 0
-                    action = "SELL" if is_long else "BUY"
-                    target_price, stop_loss = _get_target_stop_for_direction(entry_price_mem, is_long)
-
-                    await discord_ui.send_execution_alert(
+                    await discord_ui.send_close_alert(
                         symbol=symbol,
-                        action=action,
-                        confidence=confidence,
-                        market_story=technical_context,
-                        entry_price=current_price,
-                        target_price=target_price,
-                        stop_loss=stop_loss,
+                        is_long=is_long,
+                        entry_price=entry_price_mem,
+                        exit_price=current_price,
                         quantity=sell_quantity,
+                        entry_time=entry_time_mem,
+                        exit_reason="AI bearish signal",
+                        market_story=technical_context,
                     )
-                    logger.info("%s executed for %s with quantity %d.", action, symbol, sell_quantity)
+                    logger.info("Close executed for %s x%d — AI bearish signal.", symbol, sell_quantity)
                     return
 
                 logger.info(
@@ -601,6 +602,7 @@ async def main() -> None:
                                 last_sell_time[symbol_key] = datetime.now(timezone.utc)
 
                                 stopped_trade_memory = open_trade_memory.pop(symbol_key, None)
+                                entry_time_mem = stopped_trade_memory.get("entry_time") if stopped_trade_memory else None
                                 if stopped_trade_memory:
                                     _record_closed_trade(entry_price, current_price, sell_quantity, entry_conf)
                                     outcome = _trade_outcome(entry_price, current_price)
@@ -612,20 +614,17 @@ async def main() -> None:
                                     )
 
                                 is_long = holding_quantity > 0
-                                action = "SELL" if is_long else "BUY"
-                                target_price, _ = _get_target_stop_for_direction(entry_price, is_long)
-
-                                await discord_ui.send_execution_alert(
+                                await discord_ui.send_close_alert(
                                     symbol=symbol,
-                                    action=action,
-                                    confidence=1.0,
-                                    market_story=technical_context,
-                                    entry_price=current_price,
-                                    target_price=target_price,
-                                    stop_loss=trailing_stop_level,
+                                    is_long=is_long,
+                                    entry_price=entry_price,
+                                    exit_price=current_price,
                                     quantity=sell_quantity,
+                                    entry_time=entry_time_mem,
+                                    exit_reason="ATR trailing stop",
+                                    market_story=technical_context,
                                 )
-                                logger.info("%s executed for %s with quantity %d due to ATR trailing stop.", action, symbol, sell_quantity)
+                                logger.info("Close executed for %s x%d — ATR trailing stop.", symbol, sell_quantity)
                                 continue
 
                             take_profit_level = entry_price + (3 * initial_atr)
@@ -637,6 +636,7 @@ async def main() -> None:
                                 last_sell_time[symbol_key] = datetime.now(timezone.utc)
 
                                 stopped_trade_memory = open_trade_memory.pop(symbol_key, None)
+                                entry_time_mem = stopped_trade_memory.get("entry_time") if stopped_trade_memory else None
                                 if stopped_trade_memory:
                                     _record_closed_trade(entry_price, current_price, sell_quantity, entry_conf)
                                     outcome = _trade_outcome(entry_price, current_price)
@@ -648,20 +648,17 @@ async def main() -> None:
                                     )
 
                                 is_long = holding_quantity > 0
-                                action = "SELL" if is_long else "BUY"
-                                _, stop_loss = _get_target_stop_for_direction(entry_price, is_long)
-
-                                await discord_ui.send_execution_alert(
+                                await discord_ui.send_close_alert(
                                     symbol=symbol,
-                                    action=action,
-                                    confidence=1.0,
-                                    market_story=technical_context,
-                                    entry_price=current_price,
-                                    target_price=take_profit_level,
-                                    stop_loss=stop_loss,
+                                    is_long=is_long,
+                                    entry_price=entry_price,
+                                    exit_price=current_price,
                                     quantity=sell_quantity,
+                                    entry_time=entry_time_mem,
+                                    exit_reason="Take-profit target met",
+                                    market_story=technical_context,
                                 )
-                                logger.info("%s executed for %s with quantity %d due to take profit.", action, symbol, sell_quantity)
+                                logger.info("Close executed for %s x%d — take profit.", symbol, sell_quantity)
                                 continue
 
                     # News evaluation runs continuously (pre-market builds context, only executes when open)

@@ -1,5 +1,6 @@
 import os
 import logging
+from datetime import datetime, timezone
 import discord
 from discord.ext import commands
 
@@ -276,6 +277,58 @@ class OpenClawDiscord(commands.Bot):
 
         embed.add_field(name="AI Confidence — Wins", value=f"{stats.get('avg_confidence_wins', 0.0):.2f}", inline=True)
         embed.add_field(name="AI Confidence — Losses", value=f"{stats.get('avg_confidence_losses', 0.0):.2f}", inline=True)
+
+        await channel.send(embed=embed)
+
+    async def send_close_alert(
+        self,
+        symbol: str,
+        is_long: bool,
+        entry_price: float,
+        exit_price: float,
+        quantity: int,
+        entry_time: datetime | None,
+        exit_reason: str,
+        market_story: str,
+    ) -> None:
+        channel = await self._get_target_channel()
+        if channel is None:
+            return
+
+        direction_label = "CLOSED LONG" if is_long else "CLOSED SHORT"
+
+        if is_long:
+            pnl_dollars = (exit_price - entry_price) * quantity
+            pnl_pct = ((exit_price - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
+        else:
+            pnl_dollars = (entry_price - exit_price) * quantity
+            pnl_pct = ((entry_price - exit_price) / entry_price * 100) if entry_price > 0 else 0.0
+
+        is_win = pnl_dollars >= 0
+        color = 0x00FF00 if is_win else 0xFF0000
+        pnl_sign = "+" if pnl_dollars >= 0 else ""
+
+        if entry_time is not None:
+            try:
+                delta = datetime.now(timezone.utc) - entry_time
+                total_seconds = int(delta.total_seconds())
+                hours, remainder = divmod(max(total_seconds, 0), 3600)
+                minutes = remainder // 60
+                duration_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+            except Exception:
+                duration_str = "Unknown"
+        else:
+            duration_str = "Unknown"
+
+        embed = discord.Embed(title=f"{direction_label}  —  {symbol}", color=color)
+        embed.add_field(name="Realized P&L", value=f"`{pnl_sign}${pnl_dollars:,.2f}  ({pnl_sign}{pnl_pct:.2f}%)`", inline=False)
+        embed.add_field(name="Entry Price", value=f"${entry_price:,.2f}", inline=True)
+        embed.add_field(name="Exit Price", value=f"${exit_price:,.2f}", inline=True)
+        embed.add_field(name="Duration", value=duration_str, inline=True)
+        embed.add_field(name="Exit Trigger", value=exit_reason, inline=True)
+        embed.add_field(name="Quantity", value=f"{quantity:,}", inline=True)
+        embed.add_field(name="​", value="​", inline=True)
+        embed.add_field(name="Market Context", value=f"```{market_story}```", inline=False)
 
         await channel.send(embed=embed)
 
