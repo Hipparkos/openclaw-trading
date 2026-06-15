@@ -188,27 +188,23 @@ async def main() -> None:
 
     try:
         settings = load_settings(settings_path)
-        screener = VolumeGainerScreener()
-        screened_tickers = await screener.load_cached_symbols()
-
-        if screened_tickers:
-            settings["tickers"] = screened_tickers
-            logger.info(f"Using screened tickers: {screened_tickers}")
-        else:
-            logger.warning(f"Screener failed, using fallback: {settings.get('tickers', [])}")
     except ConfigurationError as e:
         logger.error(e)
         sys.exit(1)
-        
-    screener = VolumeGainerScreener()
-    tickers = await screener.load_cached_symbols()
 
-    if not tickers:
-        logger.error("Screener returned no symbols. Using fallback settings.yaml")
-        tickers = settings.get("tickers", [])
+    # Run screener once at startup (with brief delay to ensure APIs are ready)
+    logger.info("Waiting 2 seconds before screener startup...")
+    await asyncio.sleep(2)
+
+    screener = VolumeGainerScreener()
+    screened_tickers = await screener.load_cached_symbols()
+
+    if screened_tickers:
+        settings["tickers"] = screened_tickers
+        logger.info(f"Using screened tickers: {screened_tickers}")
     else:
-        settings["tickers"] = tickers
-        logger.info(f"Today's screened tickers: {tickers}")
+        fallback_tickers = settings.get("tickers", [])
+        logger.warning(f"Screener failed, using fallback from settings.yaml: {fallback_tickers}")
 
     client = IBKRClient(settings)
     order_manager = OrderManager(client)

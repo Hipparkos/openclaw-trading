@@ -4,9 +4,12 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import List
+from zoneinfo import ZoneInfo
 
 import yahoo_fin.stock_info as si
 import yfinance as yf
+
+_ET = ZoneInfo("America/New_York")
 
 
 class VolumeGainerScreener:
@@ -18,12 +21,35 @@ class VolumeGainerScreener:
     async def screen_volume_gainers(self) -> List[str]:
         self.logger.info("Starting volume gainer screener...")
 
+        # Only screen during market hours (avoid API errors when market is closed)
+        if not self._is_market_open():
+            self.logger.info("Market is currently closed. Skipping live screener.")
+            return []
+
         try:
+            self.logger.debug("Calling si.get_day_most_active()...")
             active_df = await asyncio.to_thread(si.get_day_most_active)
+            self.logger.debug(f"Raw response type: {type(active_df)}, empty: {active_df.empty if hasattr(active_df, 'empty') else 'N/A'}")
+
+            if active_df is None or (hasattr(active_df, 'empty') and active_df.empty):
+                self.logger.warning("Yahoo Finance returned empty data — market may be closed or data unavailable")
+                return []
+
+            if not hasattr(active_df, 'columns'):
+                self.logger.error(f"Response is not a DataFrame: {type(active_df)}")
+                return []
+
+            if "Symbol" not in active_df.columns:
+                self.logger.warning(f"Expected 'Symbol' column not found. Available columns: {list(active_df.columns)}")
+                return []
+
             symbols = active_df["Symbol"].head(20).tolist()
-            self.logger.info(f"Found {len(symbols)} most active stocks from Yahoo Finance")
+            self.logger.info(f"Found {len(symbols)} most active stocks from Yahoo Finance: {symbols}")
+        except KeyError as e:
+            self.logger.error(f"KeyError in screener (missing data field): {e}. This typically means market is closed or API data is incomplete.")
+            return []
         except Exception as e:
-            self.logger.error(f"Failed to fetch most active stocks: {e}")
+            self.logger.error(f"Failed to fetch most active stocks: {type(e).__name__}: {str(e)}", exc_info=True)
             return []
 
         # Validate: price range, volume, liquidity
@@ -96,6 +122,16 @@ class VolumeGainerScreener:
             return ticker.info
         except Exception:
             return {}
+
+    @staticmethod
+    def _is_market_open() -> bool:
+        """Check if US stock market is currently open (Mon-Fri 9:30-16:00 ET)."""
+        now = datetime.now(_ET)
+        if now.weekday() >= 5:  # Saturday=5, Sunday=6
+            return False
+        opens = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        closes = now.replace(hour=16, minute=0, second=0, microsecond=0)
+        return opens <= now < closes
 
     async def load_cached_symbols(self) -> List[str]:
         if self.cache_path.exists():
