@@ -1,3 +1,4 @@
+import asyncio
 import os
 import logging
 from datetime import datetime, timezone
@@ -138,6 +139,10 @@ class TradingCommands(commands.Cog):
             )
             embed.add_field(name="Current Watchlist", value=" | ".join(tickers), inline=False)
 
+            if callable(getattr(self.bot, "on_add_ticker", None)):
+                asyncio.create_task(self.bot.on_add_ticker(symbol))
+                embed.add_field(name="Data Feed", value="Fetching historical data, ready in ~30s", inline=False)
+
         await ctx.send(embed=embed)
 
     @commands.command(name="remove")
@@ -216,6 +221,11 @@ class TradingCommands(commands.Cog):
             self.bot.settings["tickers"] = screened_tickers
             logging.info(f"Discord !screener command updated tickers: {screened_tickers}")
 
+            # Subscribe IBKR data feeds for any tickers not already buffered
+            if callable(getattr(self.bot, "on_add_ticker", None)):
+                for t in screened_tickers:
+                    asyncio.create_task(self.bot.on_add_ticker(t))
+
             # Show results
             embed = discord.Embed(
                 title="🔍 SCREENER RESULTS",
@@ -250,9 +260,10 @@ class OpenClawDiscord(commands.Bot):
         intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
         self.order_manager = order_manager
-        self.on_manual_sell = None  # set by main after startup
-        self.screener = None  # set by main after startup
-        self.settings = None  # set by main after startup
+        self.on_manual_sell = None   # set by main after startup
+        self.on_add_ticker = None    # set by main after startup
+        self.screener = None         # set by main after startup
+        self.settings = None         # set by main after startup
         
         try:
             self.channel_id = int(os.getenv("DISCORD_CHANNEL_ID", 0))

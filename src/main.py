@@ -214,6 +214,15 @@ async def main() -> None:
     # Attach screener and settings to Discord bot for !screener command
     discord_ui.screener = screener
     discord_ui.settings = settings
+
+    async def _subscribe_if_new(symbol: str) -> None:
+        if symbol not in client.data_buffer:
+            logger.info("Subscribing new ticker from Discord command: %s", symbol)
+            await client._subscribe_to_ticker(symbol)
+        else:
+            logger.debug("Ticker %s already buffered, skipping re-subscription.", symbol)
+
+    discord_ui.on_add_ticker = _subscribe_if_new
     discord_token = os.getenv("DISCORD_TOKEN")
     shutdown_event = asyncio.Event()
     loop = asyncio.get_running_loop()
