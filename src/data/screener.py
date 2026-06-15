@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import List
 from zoneinfo import ZoneInfo
 
-import yahoo_fin.stock_info as si
+import requests
 import yfinance as yf
 
 _ET = ZoneInfo("America/New_York")
@@ -27,29 +27,13 @@ class VolumeGainerScreener:
             return []
 
         try:
-            self.logger.debug("Calling si.get_day_most_active()...")
-            active_df = await asyncio.to_thread(si.get_day_most_active)
-            self.logger.debug(f"Raw response type: {type(active_df)}, empty: {active_df.empty if hasattr(active_df, 'empty') else 'N/A'}")
-
-            if active_df is None or (hasattr(active_df, 'empty') and active_df.empty):
-                self.logger.warning("Yahoo Finance returned empty data — market may be closed or data unavailable")
+            symbols = await asyncio.to_thread(self._fetch_most_active)
+            if not symbols:
+                self.logger.warning("Yahoo Finance API returned no symbols.")
                 return []
-
-            if not hasattr(active_df, 'columns'):
-                self.logger.error(f"Response is not a DataFrame: {type(active_df)}")
-                return []
-
-            if "Symbol" not in active_df.columns:
-                self.logger.warning(f"Expected 'Symbol' column not found. Available columns: {list(active_df.columns)}")
-                return []
-
-            symbols = active_df["Symbol"].head(20).tolist()
-            self.logger.info(f"Found {len(symbols)} most active stocks from Yahoo Finance: {symbols}")
-        except KeyError as e:
-            self.logger.error(f"KeyError in screener (missing data field): {e}. This typically means market is closed or API data is incomplete.")
-            return []
+            self.logger.info(f"Found {len(symbols)} most active stocks: {symbols}")
         except Exception as e:
-            self.logger.error(f"Failed to fetch most active stocks: {type(e).__name__}: {str(e)}", exc_info=True)
+            self.logger.error(f"Failed to fetch most active stocks: {type(e).__name__}: {e}", exc_info=True)
             return []
 
         # Validate: price range, volume, liquidity
@@ -70,6 +54,25 @@ class VolumeGainerScreener:
             json.dump(cache_data, f)
 
         return validated
+
+    def _fetch_most_active(self) -> List[str]:
+        """Call Yahoo Finance's screener JSON API directly — no HTML parsing, no fragile library."""
+        url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
+        params = {
+            "formatted": "false",
+            "lang": "en-US",
+            "region": "US",
+            "scrIds": "most_actives",
+            "count": 25,
+        }
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        response.raise_for_status()
+
+        data = response.json()
+        quotes = data["finance"]["result"][0]["quotes"]
+        return [q["symbol"] for q in quotes if q.get("symbol")]
 
     async def _is_daytrading_suitable(self, symbol: str) -> bool:
         try:
