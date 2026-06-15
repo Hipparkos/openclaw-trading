@@ -206,14 +206,14 @@ async def main() -> None:
         fallback_tickers = settings.get("tickers", [])
         logger.warning(f"Screener failed, using fallback from settings.yaml: {fallback_tickers}")
 
-    # Attach screener and settings to Discord bot for !screener command
-    discord_ui.screener = screener
-    discord_ui.settings = settings
-
     client = IBKRClient(settings)
     order_manager = OrderManager(client)
     news_client = NewsClient()
     discord_ui = OpenClawDiscord(order_manager)
+
+    # Attach screener and settings to Discord bot for !screener command
+    discord_ui.screener = screener
+    discord_ui.settings = settings
     discord_token = os.getenv("DISCORD_TOKEN")
     shutdown_event = asyncio.Event()
     loop = asyncio.get_running_loop()
