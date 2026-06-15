@@ -260,7 +260,7 @@ async def main() -> None:
                 return 0.0
         return 0.0
 
-async def liquidate_all_positions(reason: str = "Manual") -> List[str]:
+    async def liquidate_all_positions(reason: str = "Manual") -> List[str]:
         results: List[str] = []
         now = datetime.now(timezone.utc)
         for symbol, quantity in order_manager.get_all_positions().items():
