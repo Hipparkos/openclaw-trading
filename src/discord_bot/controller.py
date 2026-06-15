@@ -126,6 +126,63 @@ class TradingCommands(commands.Cog):
             embed = discord.Embed(title="OpenClaw Status", description="Unable to retrieve status right now.", color=0x992D22)
             await ctx.send(embed=embed)
 
+    @commands.command(name="screener")
+    async def screener(self, ctx):
+        """Run the volume gainer screener and update trading tickers."""
+        if not self.bot.screener or not self.bot.settings:
+            await ctx.send("❌ Screener not available. Bot may still be initializing.")
+            return
+
+        embed = discord.Embed(
+            title="🔍 VOLUME GAINER SCREENER",
+            description="Scanning market for top volume gainers...",
+            color=0x00AAFF,
+        )
+        status_msg = await ctx.send(embed=embed)
+
+        try:
+            screened_tickers = await self.bot.screener.screen_volume_gainers()
+
+            if not screened_tickers:
+                embed = discord.Embed(
+                    title="🔍 SCREENER RESULTS",
+                    description="❌ No suitable stocks found. Market may be closed or no gainers meet criteria.",
+                    color=0xFF6600,
+                )
+                await status_msg.edit(embed=embed)
+                return
+
+            # Update bot's active tickers
+            self.bot.settings["tickers"] = screened_tickers
+            logging.info(f"Discord !screener command updated tickers: {screened_tickers}")
+
+            # Show results
+            embed = discord.Embed(
+                title="🔍 SCREENER RESULTS",
+                description=f"✅ Found {len(screened_tickers)} suitable stocks for day trading",
+                color=0x00FF00,
+            )
+            embed.add_field(
+                name="Updated Trading Tickers",
+                value=" | ".join(screened_tickers),
+                inline=False,
+            )
+            embed.add_field(
+                name="Status",
+                value="Bot will now trade only these tickers until next manual scan or daily reset.",
+                inline=False,
+            )
+            await status_msg.edit(embed=embed)
+
+        except Exception as exc:
+            logging.error("!screener command failed: %s", exc)
+            embed = discord.Embed(
+                title="🔍 SCREENER ERROR",
+                description=f"❌ Screener encountered an error: {str(exc)}",
+                color=0x992D22,
+            )
+            await status_msg.edit(embed=embed)
+
 
 class OpenClawDiscord(commands.Bot):
     def __init__(self, order_manager):
@@ -134,6 +191,8 @@ class OpenClawDiscord(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
         self.order_manager = order_manager
         self.on_manual_sell = None  # set by main after startup
+        self.screener = None  # set by main after startup
+        self.settings = None  # set by main after startup
         
         try:
             self.channel_id = int(os.getenv("DISCORD_CHANNEL_ID", 0))
