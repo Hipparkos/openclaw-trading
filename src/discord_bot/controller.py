@@ -509,7 +509,7 @@ class OpenClawDiscord(commands.Bot):
                 f"**Starting Equity:** `${result.start_equity:,.2f}`   →   "
                 f"**Final Equity:** `${result.final_equity:,.2f}`  "
                 f"(`{pnl_sign}${pnl_dollars:,.2f}`)\n"
-                f"⚠️ *Signal: technical indicators only — no LLM/news (unavailable for historical replay)*"
+                f"⚠️ *Signal: LLM (technical indicators only — no news for historical replay)*"
             ),
             color=color,
         )

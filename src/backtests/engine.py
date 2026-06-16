@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 import requests
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -409,14 +410,39 @@ class BacktestEngine:
                 timeout=30,
             )
             resp.raise_for_status()
-            content = resp.json().get("message", {}).get("content", "")
-            data = json.loads(content.strip())
-            direction = str(data.get("direction", "NEUTRAL")).upper()
-            confidence = float(data.get("confidence", 0.0))
-            confidence = max(0.0, min(1.0, confidence))
-            if direction not in ("BULLISH", "BEARISH", "NEUTRAL"):
-                direction = "NEUTRAL"
-            return direction, confidence
+            raw = resp.json().get("message", {}).get("content", "").strip()
+
+            # Same multi-layer parser as NewsClient._parse_openclaw_response
+            if raw.startswith("```"):
+                raw = re.sub(
+                    r"^```(?:json)?\s*|\s*```$", "", raw,
+                    flags=re.IGNORECASE | re.DOTALL,
+                ).strip()
+
+            data = None
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+                if m:
+                    try:
+                        data = json.loads(m.group(0))
+                    except json.JSONDecodeError:
+                        pass
+
+            if isinstance(data, dict):
+                direction = str(data.get("direction", "NEUTRAL")).upper()
+                if direction not in ("BULLISH", "BEARISH", "NEUTRAL"):
+                    direction = "NEUTRAL"
+                confidence = max(0.0, min(1.0, float(data.get("confidence", 0.0))))
+                return direction, confidence
+
+            # Last resort: regex scan for direction keyword
+            dm = re.search(r"\b(BULLISH|BEARISH|NEUTRAL)\b", raw, re.IGNORECASE)
+            if dm:
+                return dm.group(1).upper(), 0.5
+
+            return "NEUTRAL", 0.0
         except Exception as exc:
             self.logger.warning("LLM evaluate failed for %s: %s — treating as NEUTRAL", symbol, exc)
             return "NEUTRAL", 0.0
