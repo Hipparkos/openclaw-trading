@@ -26,7 +26,7 @@ import json
 import logging
 import math
 import re
-import requests
+import aiohttp
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -372,10 +372,14 @@ class BacktestEngine:
                 hourly_trend = self._strategy.evaluate_hourly_trend(df_1h)
         return f"{hourly_trend} | 5m: {tech_5m}" if hourly_trend else tech_5m
 
-    def _llm_evaluate(self, symbol: str, technical_context: str) -> tuple[str, float]:
+    async def _llm_evaluate(
+        self,
+        symbol: str,
+        technical_context: str,
+    ) -> tuple[str, float]:
         """
-        Synchronous Ollama call — safe to call from asyncio.to_thread().
-        Mirrors get_openclaw_prediction() but without news (historical replay).
+        Async Ollama call via aiohttp — same library as the live system.
+        90-second timeout handles cold model loads.
         Returns (direction, confidence).
         """
         system_prompt = (
@@ -403,14 +407,17 @@ class BacktestEngine:
             "stream": False,
             "options": {"temperature": 0.4},
         }
+        timeout = aiohttp.ClientTimeout(total=90, connect=10, sock_read=80)
         try:
-            resp = requests.post(
-                f"{self.ollama_url}/api/chat",
-                json=payload,
-                timeout=30,
-            )
-            resp.raise_for_status()
-            raw = resp.json().get("message", {}).get("content", "").strip()
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    f"{self.ollama_url}/api/chat",
+                    json=payload,
+                ) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json(content_type=None)
+
+            raw = data.get("message", {}).get("content", "").strip()
 
             # Same multi-layer parser as NewsClient._parse_openclaw_response
             if raw.startswith("```"):
@@ -419,25 +426,24 @@ class BacktestEngine:
                     flags=re.IGNORECASE | re.DOTALL,
                 ).strip()
 
-            data = None
+            parsed = None
             try:
-                data = json.loads(raw)
+                parsed = json.loads(raw)
             except json.JSONDecodeError:
                 m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
                 if m:
                     try:
-                        data = json.loads(m.group(0))
+                        parsed = json.loads(m.group(0))
                     except json.JSONDecodeError:
                         pass
 
-            if isinstance(data, dict):
-                direction = str(data.get("direction", "NEUTRAL")).upper()
+            if isinstance(parsed, dict):
+                direction = str(parsed.get("direction", "NEUTRAL")).upper()
                 if direction not in ("BULLISH", "BEARISH", "NEUTRAL"):
                     direction = "NEUTRAL"
-                confidence = max(0.0, min(1.0, float(data.get("confidence", 0.0))))
+                confidence = max(0.0, min(1.0, float(parsed.get("confidence", 0.0))))
                 return direction, confidence
 
-            # Last resort: regex scan for direction keyword
             dm = re.search(r"\b(BULLISH|BEARISH|NEUTRAL)\b", raw, re.IGNORECASE)
             if dm:
                 return dm.group(1).upper(), 0.5
@@ -449,7 +455,7 @@ class BacktestEngine:
 
     # ── Symbol replay ──────────────────────────────────────────────────────────
 
-    def _replay_symbol(
+    async def _replay_symbol(
         self,
         symbol: str,
         bars_5m: list[BarData],
@@ -701,8 +707,8 @@ class BacktestEngine:
                 continue
 
             self.logger.info("Replaying %s — %d bars (LLM active)", symbol, n5)
-            sym_trades, equity, sig_count = await asyncio.to_thread(
-                self._replay_symbol, symbol, bars_5m, bars_1h, equity
+            sym_trades, equity, sig_count = await self._replay_symbol(
+                symbol, bars_5m, bars_1h, equity
             )
             result.bars_replayed[symbol] = n5
             result.signals_fired[symbol] = sig_count
