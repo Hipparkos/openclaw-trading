@@ -585,16 +585,25 @@ class BacktestEngine:
                     continue
 
                 # Pre-filter: fast indicator vote — avoids LLM call on bars with no activity
-                sig, _ = self._compute_signal(window_5m, window_1h, cached_df=cached_df)
-                if sig == "NEUTRAL":
+                sig_det, conf_det = self._compute_signal(window_5m, window_1h, cached_df=cached_df)
+                if sig_det == "NEUTRAL":
                     continue
                 signals_attempted += 1
 
                 # LLM confirmation: same model + prompt as live, technical context only (no news)
                 tech_ctx = self._build_technical_context(cached_df, window_1h)
-                sig, conf = self._llm_evaluate(symbol, tech_ctx)
-                if sig == "NEUTRAL" or conf < 0.5:
-                    continue
+                llm_sig, llm_conf = self._llm_evaluate(symbol, tech_ctx)
+
+                if llm_sig != "NEUTRAL":
+                    # LLM gave a clear verdict — use it
+                    sig, conf = llm_sig, llm_conf
+                    if conf < 0.5:
+                        continue
+                else:
+                    # LLM failed or returned neutral — fall back to deterministic pre-filter
+                    sig, conf = sig_det, conf_det
+                    if conf < 0.4:
+                        continue
 
                 qty = max(1, int((equity * self.POSITION_PCT * conf) / fill_price))
                 direction = "LONG" if sig == "BULLISH" else "SHORT"

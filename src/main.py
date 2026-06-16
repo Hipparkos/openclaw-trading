@@ -738,10 +738,11 @@ async def main() -> None:
                         )
                         break
 
-                try:
-                    await asyncio.wait_for(shutdown_event.wait(), timeout=60)
-                except asyncio.TimeoutError:
-                    continue
+                # Sleep in 5-second increments so backtest_mode is noticed within 5 s
+                for _ in range(12):
+                    if shutdown_event.is_set() or settings.get("backtest_mode"):
+                        break
+                    await asyncio.sleep(5)
 
         asyncio.create_task(_stream_news())
 
