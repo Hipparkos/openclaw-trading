@@ -61,6 +61,11 @@ class BacktestResult:
     duration_days: int = 90
     tickers: list[str] = field(default_factory=list)
 
+    # Diagnostic — populated during run() before finalise()
+    bars_fetched: dict = field(default_factory=dict)   # {symbol: int}  5m bars per ticker
+    bars_replayed: dict = field(default_factory=dict)  # {symbol: int}  bars that reached signal eval
+    signals_fired: dict = field(default_factory=dict)  # {symbol: int}  entries attempted
+
     # Computed by finalise()
     total_return: float = 0.0
     annualised_return: float = 0.0
@@ -193,7 +198,8 @@ class BacktestEngine:
     MIN_HOLD_BARS = 3         # 15 minutes before AI-reversal exit allowed
     COOLDOWN_BARS = 3         # 15-minute cooldown after close
     MAX_LOOKBACK_5M = 200     # rolling window for indicator computation
-    IBKR_REQUEST_PAUSE = 2.0  # seconds between IBKR historical data calls
+    IBKR_TIMEFRAME_PAUSE = 5.0   # seconds between bar-size requests for same symbol
+    IBKR_SYMBOL_PAUSE = 12.0     # seconds between symbols — avoids pacing with live subs
 
     def __init__(self, client: IBKRClient, start_equity: float = 100_000.0) -> None:
         self.client = client
@@ -250,7 +256,7 @@ class BacktestEngine:
                 self.logger.error("Historical fetch failed for %s [%s]: %s", symbol, bar_size, exc)
                 result[bar_size] = []
 
-            await asyncio.sleep(self.IBKR_REQUEST_PAUSE)
+            await asyncio.sleep(self.IBKR_TIMEFRAME_PAUSE)
 
         return result
 
@@ -260,6 +266,7 @@ class BacktestEngine:
         self,
         window_5m: list[BarData],
         window_1h: list[BarData],
+        cached_df=None,
     ) -> tuple[str, float]:
         """
         Pure indicator-alignment signal.  Mirrors what the LLM synthesises from
@@ -267,12 +274,13 @@ class BacktestEngine:
 
         Returns (direction, confidence) where confidence is the fraction of
         indicators that voted for the winning side (0.0–1.0).
+        cached_df: pre-computed result of calculate_all(window_5m) to avoid recomputing.
         """
         if len(window_5m) < self.WARMUP_BARS:
             return "NEUTRAL", 0.0
 
-        df = self._calc.calculate_all(window_5m)
-        if df.empty:
+        df = cached_df if cached_df is not None else self._calc.calculate_all(window_5m)
+        if df is None or df.empty:
             return "NEUTRAL", 0.0
 
         row = df.iloc[-1]
@@ -346,13 +354,15 @@ class BacktestEngine:
         bars_5m: list[BarData],
         bars_1h: list[BarData],
         starting_equity: float,
-    ) -> tuple[list[TradeRecord], float]:
+    ) -> tuple[list[TradeRecord], float, int]:
         """
         Sequential bar-by-bar replay.  Fill price is always bar[i+1].open so
         the signal bar's close is never used as the entry/exit price.
+        Returns (trades, final_equity, signals_attempted).
         """
         trades: list[TradeRecord] = []
         equity = starting_equity
+        signals_attempted = 0
 
         # Open-position state
         in_position = False
@@ -381,12 +391,13 @@ class BacktestEngine:
             window_5m = bars_5m[max(0, i - self.MAX_LOOKBACK_5M + 1): i + 1]
             window_1h = _hourly_bars_up_to(bars_1h, current_time)
 
-            # Current ATR (needed for trailing stop and take-profit)
+            # Compute indicators ONCE per bar — reused for ATR and signal
             current_atr = 0.0
+            cached_df = None
             if len(window_5m) >= self.WARMUP_BARS:
-                df = self._calc.calculate_all(window_5m)
-                if not df.empty:
-                    atr_val = df.iloc[-1].get("atr_14")
+                cached_df = self._calc.calculate_all(window_5m)
+                if not cached_df.empty:
+                    atr_val = cached_df.iloc[-1].get("atr_14")
                     if atr_val is not None:
                         try:
                             v = float(atr_val)
@@ -472,8 +483,11 @@ class BacktestEngine:
                 if last_exit_bar >= 0 and (i - last_exit_bar) < self.COOLDOWN_BARS:
                     continue
 
-                sig, conf = self._compute_signal(window_5m, window_1h)
-                if sig == "NEUTRAL" or conf < 0.5:
+                # Pass the already-computed df so _compute_signal doesn't re-run calculate_all
+                sig, conf = self._compute_signal(window_5m, window_1h, cached_df=cached_df)
+                if sig != "NEUTRAL":
+                    signals_attempted += 1
+                if sig == "NEUTRAL" or conf < 0.4:   # 0.4 threshold: 2/5 indicators aligning
                     continue
 
                 qty = max(1, int((equity * self.POSITION_PCT) / fill_price))
@@ -515,7 +529,7 @@ class BacktestEngine:
                 confidence=entry_confidence,
             ))
 
-        return trades, equity
+        return trades, equity, signals_attempted
 
     # ── Public entry point ─────────────────────────────────────────────────────
 
@@ -537,16 +551,22 @@ class BacktestEngine:
             tickers, duration, start_eq,
         )
 
-        # Fetch data for all tickers sequentially (IBKR pacing)
+        # Fetch data for all tickers sequentially.
+        # Long inter-symbol pause avoids IBKR's 60-requests/10-min pacing limit,
+        # which is easily hit when live keepUpToDate subscriptions are already open.
         symbol_bars: dict[str, dict[str, list[BarData]]] = {}
         for symbol in tickers:
             self.logger.info("Fetching historical bars for %s...", symbol)
             bars = await self._fetch_bars(symbol, duration)
-            if bars.get("5 mins"):
+            n5 = len(bars.get("5 mins", []))
+            n1 = len(bars.get("1 hour", []))
+            result.bars_fetched[symbol] = n5
+            self.logger.info("%s → 5m=%d bars, 1h=%d bars", symbol, n5, n1)
+            if n5 > 0:
                 symbol_bars[symbol] = bars
             else:
-                self.logger.warning("Skipping %s — no 5m bars returned.", symbol)
-            await asyncio.sleep(self.IBKR_REQUEST_PAUSE)
+                self.logger.warning("Skipping %s — IBKR returned 0 bars (pacing or data issue).", symbol)
+            await asyncio.sleep(self.IBKR_SYMBOL_PAUSE)
 
         if not symbol_bars:
             self.logger.error("No data fetched for any ticker. Backtest aborted.")
@@ -565,15 +585,19 @@ class BacktestEngine:
                     "%s: only %d 5m bars — need at least %d. Skipping.",
                     symbol, len(bars_5m), self.WARMUP_BARS + 2,
                 )
+                result.bars_replayed[symbol] = 0
                 continue
 
             self.logger.info("Replaying %s — %d bars", symbol, len(bars_5m))
-            sym_trades, equity = await asyncio.to_thread(
+            sym_trades, equity, sig_count = await asyncio.to_thread(
                 self._replay_symbol, symbol, bars_5m, bars_1h, equity
             )
+            result.bars_replayed[symbol] = len(bars_5m)
+            result.signals_fired[symbol] = sig_count
             all_trades.extend(sym_trades)
             self.logger.info(
-                "%s done | trades=%d | equity_after=%.2f", symbol, len(sym_trades), equity
+                "%s done | trades=%d | signals=%d | equity_after=%.2f",
+                symbol, len(sym_trades), sig_count, equity,
             )
 
         # Sort chronologically and compute all metrics

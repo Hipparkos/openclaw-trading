@@ -514,6 +514,54 @@ class OpenClawDiscord(commands.Bot):
             color=color,
         )
 
+        # ── Diagnostic section — only shown when 0 trades produced ──
+        if result.total_trades == 0:
+            bars_report = result.bars_fetched if hasattr(result, "bars_fetched") else {}
+            signals_report = result.signals_fired if hasattr(result, "signals_fired") else {}
+
+            total_bars = sum(bars_report.values())
+            total_signals = sum(signals_report.values())
+
+            if total_bars == 0:
+                diag_title = "❌ DATA FETCH FAILED"
+                diag_body = (
+                    "IBKR returned **0 bars** for every ticker.\n"
+                    "**Most likely cause:** IBKR pacing limit hit. The live bot already\n"
+                    "holds streaming subscriptions (up to 48 open connections). Adding\n"
+                    "backtest requests pushed over the 60-req/10-min limit.\n\n"
+                    "**Fix:** Wait 10 minutes, then retry `!backteston`. The new\n"
+                    "engine now uses 12-second gaps between symbols to avoid this."
+                )
+            elif total_signals == 0:
+                diag_title = "⚠️ BARS FETCHED — NO SIGNALS FIRED"
+                fetch_lines = "\n".join(
+                    f"`{sym}`: {n:,} bars" for sym, n in bars_report.items()
+                )
+                diag_body = (
+                    f"Data was fetched successfully:\n{fetch_lines}\n\n"
+                    "But no signals passed the entry threshold. This can happen when\n"
+                    "indicator alignment (RSI + MACD + VWAP + SMA5 + 1h trend) rarely\n"
+                    "reaches 2-out-of-5 agreement. Check docker logs for signal scores."
+                )
+            else:
+                diag_title = "⚠️ SIGNALS FIRED — NO TRADES RECORDED"
+                fetch_lines = "\n".join(
+                    f"`{sym}`: {bars_report.get(sym, 0):,} bars, "
+                    f"{signals_report.get(sym, 0)} signals"
+                    for sym in bars_report
+                )
+                diag_body = (
+                    f"{fetch_lines}\n\n"
+                    "Signals fired but no entries recorded — check the confidence\n"
+                    "threshold and cooldown logic in engine.py."
+                )
+
+            embed.add_field(name="​", value=f"**— {diag_title} —**", inline=False)
+            embed.add_field(name="Diagnostics", value=diag_body, inline=False)
+            embed.set_footer(text="Check docker logs for per-ticker bar counts and signal scores.")
+            await channel.send(embed=embed)
+            return
+
         # ── Section 1: Return Metrics ──
         embed.add_field(name="​", value="**— RETURN METRICS —**", inline=False)
         embed.add_field(
