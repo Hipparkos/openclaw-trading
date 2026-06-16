@@ -7,21 +7,25 @@ strategy at bar t never sees data from t+1.
 
 Key design choices
 ──────────────────
-• No LLM / news calls — historical headlines are unavailable for exact replay
-  so the signal is generated from pure indicator alignment (the same indicators
-  the LLM reads, evaluated deterministically).
+• LLM (openclaw/llama3.2) is called at every entry candidate — same model and
+  prompt structure as live, but without news (historical headlines unavailable).
+  _compute_signal() acts as a cheap pre-filter to avoid calling Ollama on bars
+  with no indicator activity.
 • Fill price = next bar's open, NOT the signal bar's close.  This is the most
   important anti-lookahead-bias guard.
-• Position sizing mirrors live trading: 1.5% of current equity per trade.
+• Position sizing is confidence-proportional: 1.5% × LLM confidence per trade.
 • Exit rules are identical to live: 2% hard stop, ATR trailing stop, 3×ATR
   take-profit, signal reversal — in that priority order.
+• $1.50/trade flat commission applied to every round-trip.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
+import requests
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -207,10 +211,12 @@ class BacktestEngine:
         client: IBKRClient,
         start_equity: float = 100_000.0,
         commission_per_trade: float = 1.50,
+        ollama_url: str = "http://openclaw_ollama:11434",
     ) -> None:
         self.client = client
         self.start_equity = start_equity
         self.commission_per_trade = commission_per_trade
+        self.ollama_url = ollama_url
         self.logger = logging.getLogger("BacktestEngine")
         self._calc = IndicatorCalculator()
         self._strategy = StrategyEngine()
@@ -353,6 +359,68 @@ class BacktestEngine:
             return "BEARISH", confidence
         return "NEUTRAL", 0.0
 
+    # ── LLM evaluation ─────────────────────────────────────────────────────────
+
+    def _build_technical_context(self, cached_df, window_1h: list[BarData]) -> str:
+        """Build the same technical_context string that live trading sends to the LLM."""
+        tech_5m = self._strategy.evaluate_signals(cached_df)
+        hourly_trend = ""
+        if len(window_1h) >= 2:
+            df_1h = self._calc.calculate_all(window_1h)
+            if df_1h is not None and not df_1h.empty:
+                hourly_trend = self._strategy.evaluate_hourly_trend(df_1h)
+        return f"{hourly_trend} | 5m: {tech_5m}" if hourly_trend else tech_5m
+
+    def _llm_evaluate(self, symbol: str, technical_context: str) -> tuple[str, float]:
+        """
+        Synchronous Ollama call — safe to call from asyncio.to_thread().
+        Mirrors get_openclaw_prediction() but without news (historical replay).
+        Returns (direction, confidence).
+        """
+        system_prompt = (
+            "You are an elite quantitative trading intelligence engine analyzing historical chart data. "
+            "No news context is available for this replay — evaluate based on technical indicators only.\n\n"
+            "### ANALYTICAL FRAMEWORK\n"
+            "Assess: trend (moving averages), momentum (RSI, MACD), mean-reversion (Bollinger Bands), "
+            "and price vs VWAP. Rate conviction 0.5 to 1.0 when indicators clearly align in one direction. "
+            "Output NEUTRAL when indicators conflict or the setup is ambiguous.\n\n"
+            "### STRICT OUTPUT PROTOCOL\n"
+            "Output ONLY raw, unformatted JSON — no markdown, no explanation:\n"
+            "{\"direction\": \"BULLISH\" | \"BEARISH\" | \"NEUTRAL\", \"confidence\": <float>}"
+        )
+        user_prompt = (
+            f"Ticker: {symbol}\n"
+            f"Technical Setup: {technical_context}\n\n"
+            "Return the JSON evaluation now."
+        )
+        payload = {
+            "model": "openclaw",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "stream": False,
+            "options": {"temperature": 0.4},
+        }
+        try:
+            resp = requests.post(
+                f"{self.ollama_url}/api/chat",
+                json=payload,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            content = resp.json().get("message", {}).get("content", "")
+            data = json.loads(content.strip())
+            direction = str(data.get("direction", "NEUTRAL")).upper()
+            confidence = float(data.get("confidence", 0.0))
+            confidence = max(0.0, min(1.0, confidence))
+            if direction not in ("BULLISH", "BEARISH", "NEUTRAL"):
+                direction = "NEUTRAL"
+            return direction, confidence
+        except Exception as exc:
+            self.logger.warning("LLM evaluate failed for %s: %s — treating as NEUTRAL", symbol, exc)
+            return "NEUTRAL", 0.0
+
     # ── Symbol replay ──────────────────────────────────────────────────────────
 
     def _replay_symbol(
@@ -490,11 +558,16 @@ class BacktestEngine:
                 if last_exit_bar >= 0 and (i - last_exit_bar) < self.COOLDOWN_BARS:
                     continue
 
-                # Pass the already-computed df so _compute_signal doesn't re-run calculate_all
-                sig, conf = self._compute_signal(window_5m, window_1h, cached_df=cached_df)
-                if sig != "NEUTRAL":
-                    signals_attempted += 1
-                if sig == "NEUTRAL" or conf < 0.4:   # 0.4 threshold: 2/5 indicators aligning
+                # Pre-filter: fast indicator vote — avoids LLM call on bars with no activity
+                sig, _ = self._compute_signal(window_5m, window_1h, cached_df=cached_df)
+                if sig == "NEUTRAL":
+                    continue
+                signals_attempted += 1
+
+                # LLM confirmation: same model + prompt as live, technical context only (no news)
+                tech_ctx = self._build_technical_context(cached_df, window_1h)
+                sig, conf = self._llm_evaluate(symbol, tech_ctx)
+                if sig == "NEUTRAL" or conf < 0.5:
                     continue
 
                 qty = max(1, int((equity * self.POSITION_PCT * conf) / fill_price))
