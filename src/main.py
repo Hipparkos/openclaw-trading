@@ -451,7 +451,7 @@ async def main() -> None:
                         return
 
                     account_equity = order_manager.get_account_equity()
-                    target_capital = account_equity * 0.015 if account_equity > 0.0 else 0.0
+                    target_capital = account_equity * 0.015 * confidence if account_equity > 0.0 else 0.0
                     calculated_shares = (target_capital / current_price) if current_price > 0.0 else 0.0
                     trade_size = max(1, int(calculated_shares))
                     logger.info(

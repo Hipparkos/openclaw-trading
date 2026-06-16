@@ -647,10 +647,15 @@ class OpenClawDiscord(commands.Bot):
             value=f"`{'+' if result.expectancy >= 0 else ''}${result.expectancy:,.2f}`",
             inline=True,
         )
+        embed.add_field(
+            name="Total Commissions",
+            value=f"`-${result.total_commissions:,.2f}`",
+            inline=True,
+        )
         embed.add_field(name="​", value="​", inline=True)
 
         embed.set_footer(text=(
-            "Fill price = next bar open  ·  Costs not modelled  ·  "
+            "Fill price = next bar open  ·  $1.50/trade commission applied  ·  "
             "Signal: technical alignment only  ·  Past results ≠ future performance"
         ))
 

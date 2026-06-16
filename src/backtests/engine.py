@@ -80,6 +80,7 @@ class BacktestResult:
     profit_factor: float = 0.0
     expectancy: float = 0.0
     total_trades: int = 0
+    total_commissions: float = 0.0
 
     def finalise(self) -> None:
         self.total_trades = len(self.trades)
@@ -201,9 +202,15 @@ class BacktestEngine:
     IBKR_TIMEFRAME_PAUSE = 5.0   # seconds between bar-size requests for same symbol
     IBKR_SYMBOL_PAUSE = 12.0     # seconds between symbols — avoids pacing with live subs
 
-    def __init__(self, client: IBKRClient, start_equity: float = 100_000.0) -> None:
+    def __init__(
+        self,
+        client: IBKRClient,
+        start_equity: float = 100_000.0,
+        commission_per_trade: float = 1.50,
+    ) -> None:
         self.client = client
         self.start_equity = start_equity
+        self.commission_per_trade = commission_per_trade
         self.logger = logging.getLogger("BacktestEngine")
         self._calc = IndicatorCalculator()
         self._strategy = StrategyEngine()
@@ -453,10 +460,10 @@ class BacktestEngine:
                 if exit_reason:
                     exit_price = fill_price
                     if direction == "LONG":
-                        pnl = (exit_price - entry_price) * quantity
+                        pnl = (exit_price - entry_price) * quantity - 2.0 * self.commission_per_trade
                         pnl_pct = (exit_price - entry_price) / entry_price
                     else:
-                        pnl = (entry_price - exit_price) * quantity
+                        pnl = (entry_price - exit_price) * quantity - 2.0 * self.commission_per_trade
                         pnl_pct = (entry_price - exit_price) / entry_price
 
                     equity += pnl
@@ -490,7 +497,7 @@ class BacktestEngine:
                 if sig == "NEUTRAL" or conf < 0.4:   # 0.4 threshold: 2/5 indicators aligning
                     continue
 
-                qty = max(1, int((equity * self.POSITION_PCT) / fill_price))
+                qty = max(1, int((equity * self.POSITION_PCT * conf) / fill_price))
                 direction = "LONG" if sig == "BULLISH" else "SHORT"
                 entry_price = fill_price
                 entry_time = current_time
@@ -508,10 +515,10 @@ class BacktestEngine:
             last_time = _to_utc(last_bar.timestamp)
 
             if direction == "LONG":
-                pnl = (last_price - entry_price) * quantity
+                pnl = (last_price - entry_price) * quantity - 2.0 * self.commission_per_trade
                 pnl_pct = (last_price - entry_price) / entry_price
             else:
-                pnl = (entry_price - last_price) * quantity
+                pnl = (entry_price - last_price) * quantity - 2.0 * self.commission_per_trade
                 pnl_pct = (entry_price - last_price) / entry_price
 
             equity += pnl
@@ -604,6 +611,7 @@ class BacktestEngine:
         all_trades.sort(key=lambda t: t.entry_time)
         result.trades = all_trades
         result.finalise()
+        result.total_commissions = 2.0 * self.commission_per_trade * result.total_trades
 
         self.logger.info(
             "Backtest complete | trades=%d | return=%.2f%% | sharpe=%.2f | max_dd=%.2f%%",
