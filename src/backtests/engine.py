@@ -666,54 +666,60 @@ class BacktestEngine:
             tickers, duration, start_eq,
         )
 
-        # Fetch data for all tickers sequentially.
-        # Long inter-symbol pause avoids IBKR's 60-requests/10-min pacing limit,
-        # which is easily hit when live keepUpToDate subscriptions are already open.
-        symbol_bars: dict[str, dict[str, list[BarData]]] = {}
+        # Fetch then immediately replay each ticker before moving to the next.
+        # This surfaces per-ticker results in the terminal as they complete and
+        # keeps IBKR pacing safe — the replay time absorbs most of the required
+        # inter-request gap; the explicit sleep at the end provides the minimum.
+        equity = start_eq
+        all_trades: list[TradeRecord] = []
+        fetched_any = False
+
         for symbol in tickers:
             self.logger.info("Fetching historical bars for %s...", symbol)
             bars = await self._fetch_bars(symbol, duration)
-            n5 = len(bars.get("5 mins", []))
-            n1 = len(bars.get("1 hour", []))
+            bars_5m = bars.get("5 mins", [])
+            bars_1h = bars.get("1 hour", [])
+            n5 = len(bars_5m)
+            n1 = len(bars_1h)
             result.bars_fetched[symbol] = n5
             self.logger.info("%s → 5m=%d bars, 1h=%d bars", symbol, n5, n1)
-            if n5 > 0:
-                symbol_bars[symbol] = bars
-            else:
+
+            if n5 == 0:
                 self.logger.warning("Skipping %s — IBKR returned 0 bars (pacing or data issue).", symbol)
-            await asyncio.sleep(self.IBKR_SYMBOL_PAUSE)
-
-        if not symbol_bars:
-            self.logger.error("No data fetched for any ticker. Backtest aborted.")
-            return result
-
-        # Replay each symbol (CPU-bound — offloaded from the event loop)
-        equity = start_eq
-        all_trades: list[TradeRecord] = []
-
-        for symbol, bars_by_tf in symbol_bars.items():
-            bars_5m = bars_by_tf.get("5 mins", [])
-            bars_1h = bars_by_tf.get("1 hour", [])
-
-            if len(bars_5m) < self.WARMUP_BARS + 2:
-                self.logger.warning(
-                    "%s: only %d 5m bars — need at least %d. Skipping.",
-                    symbol, len(bars_5m), self.WARMUP_BARS + 2,
-                )
-                result.bars_replayed[symbol] = 0
+                await asyncio.sleep(self.IBKR_SYMBOL_PAUSE)
                 continue
 
-            self.logger.info("Replaying %s — %d bars", symbol, len(bars_5m))
+            fetched_any = True
+
+            if n5 < self.WARMUP_BARS + 2:
+                self.logger.warning(
+                    "%s: only %d 5m bars — need at least %d. Skipping.",
+                    symbol, n5, self.WARMUP_BARS + 2,
+                )
+                result.bars_replayed[symbol] = 0
+                await asyncio.sleep(self.IBKR_SYMBOL_PAUSE)
+                continue
+
+            self.logger.info("Replaying %s — %d bars (LLM active)", symbol, n5)
             sym_trades, equity, sig_count = await asyncio.to_thread(
                 self._replay_symbol, symbol, bars_5m, bars_1h, equity
             )
-            result.bars_replayed[symbol] = len(bars_5m)
+            result.bars_replayed[symbol] = n5
             result.signals_fired[symbol] = sig_count
             all_trades.extend(sym_trades)
             self.logger.info(
                 "%s done | trades=%d | signals=%d | equity_after=%.2f",
                 symbol, len(sym_trades), sig_count, equity,
             )
+
+            # Minimum IBKR pacing gap before the next symbol's fetch.
+            # When LLM replay takes longer than IBKR_SYMBOL_PAUSE the sleep is
+            # still useful as a brief yield back to the event loop.
+            await asyncio.sleep(self.IBKR_SYMBOL_PAUSE)
+
+        if not fetched_any:
+            self.logger.error("No data fetched for any ticker. Backtest aborted.")
+            return result
 
         # Sort chronologically and compute all metrics
         all_trades.sort(key=lambda t: t.entry_time)
