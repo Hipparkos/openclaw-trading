@@ -598,7 +598,7 @@ class BacktestEngine:
 
                 # LLM confirmation: same model + prompt as live, technical context only (no news)
                 tech_ctx = self._build_technical_context(cached_df, window_1h)
-                llm_sig, llm_conf = self._llm_evaluate(symbol, tech_ctx)
+                llm_sig, llm_conf = await self._llm_evaluate(symbol, tech_ctx)
 
                 if llm_sig != "NEUTRAL":
                     # LLM gave a clear verdict — use it
