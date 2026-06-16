@@ -608,6 +608,8 @@ async def main() -> None:
                     eod_liquidation_done_date = today_et
 
                 for symbol in settings["tickers"]:
+                    if settings.get("backtest_mode"):
+                        break
                     technical_context, current_price, current_atr = await _build_trade_snapshot(symbol)
 
                     holding_quantity = order_manager.get_position(symbol)
