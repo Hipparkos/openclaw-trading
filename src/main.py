@@ -19,6 +19,7 @@ import uvicorn
 import yaml
 from dotenv import load_dotenv
 
+from backtests.engine import BacktestEngine
 from data.ibkr_client import IBKRClient
 from data.news_client import NewsClient
 from discord_bot.controller import OpenClawDiscord
@@ -223,6 +224,37 @@ async def main() -> None:
             logger.debug("Ticker %s already buffered, skipping re-subscription.", symbol)
 
     discord_ui.on_add_ticker = _subscribe_if_new
+
+    # ── Backtest callbacks ────────────────────────────────────────────────────
+    backtest_engine = BacktestEngine(client, start_equity=100_000.0)
+
+    async def _run_backtest(channel_id: int) -> None:
+        settings["backtest_mode"] = True
+        logger.info("Backtest mode ON — live trading suspended.")
+        try:
+            account_equity = order_manager.get_account_equity()
+            tickers = list(settings.get("tickers", []))
+            result = await backtest_engine.run(
+                tickers=tickers,
+                account_equity=account_equity if account_equity > 0 else None,
+            )
+            await discord_ui.send_backtest_result(result, channel_id=channel_id)
+        except Exception as exc:
+            logger.error("Backtest failed: %s", exc, exc_info=True)
+            channel = discord_ui.get_channel(channel_id)
+            if channel:
+                await channel.send(f"Backtest encountered an error: {exc}")
+        finally:
+            settings["backtest_mode"] = False
+            logger.info("Backtest mode OFF — live trading resumed.")
+
+    def _stop_backtest() -> None:
+        settings["backtest_mode"] = False
+        logger.info("Backtest mode cleared manually.")
+
+    discord_ui.on_backtest_start = _run_backtest
+    discord_ui.on_backtest_stop = _stop_backtest
+
     discord_token = os.getenv("DISCORD_TOKEN")
     shutdown_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -550,6 +582,11 @@ async def main() -> None:
                 )
 
             while not shutdown_event.is_set():
+                # Pause live trading while a backtest is running
+                if settings.get("backtest_mode"):
+                    await asyncio.sleep(5)
+                    continue
+
                 nonlocal eod_recap_sent_date, eod_liquidation_done_date
                 today_et = _now_et().date()
 

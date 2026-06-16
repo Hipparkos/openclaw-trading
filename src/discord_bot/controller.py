@@ -83,6 +83,43 @@ class TradingCommands(commands.Cog):
             embed = discord.Embed(title="Account Equity", description="Unable to retrieve account equity right now.", color=0x992D22)
             await ctx.send(embed=embed)
 
+    @commands.command(name="backteston")
+    async def backteston(self, ctx):
+        """Suspend live trading and run a 90-day historical backtest."""
+        if not callable(getattr(self.bot, "on_backtest_start", None)):
+            await ctx.send("Backtest engine not available yet.")
+            return
+
+        if self.bot.settings and self.bot.settings.get("backtest_mode"):
+            await ctx.send("A backtest is already running. Use `!backtestoff` to stop it first.")
+            return
+
+        embed = discord.Embed(
+            title="BACKTEST INITIATED",
+            description=(
+                "Live trading **suspended**.\n"
+                "Fetching 90 days of historical data and replaying strategy...\n"
+                "This may take 2–5 minutes depending on ticker count."
+            ),
+            color=0x00AAFF,
+        )
+        await ctx.send(embed=embed)
+
+        asyncio.create_task(self.bot.on_backtest_start(ctx.channel.id))
+
+    @commands.command(name="backtestoff")
+    async def backtestoff(self, ctx):
+        """Clear backtest state and resume live IBKR execution."""
+        if callable(getattr(self.bot, "on_backtest_stop", None)):
+            self.bot.on_backtest_stop()
+
+        embed = discord.Embed(
+            title="LIVE TRADING RESUMED",
+            description="Backtest mode cleared. Bot is back to live execution.",
+            color=0x00FF00,
+        )
+        await ctx.send(embed=embed)
+
     @commands.command(name="closeall")
     async def closeall(self, ctx):
         if not callable(getattr(self.bot, "on_manual_sell", None)):
@@ -260,10 +297,12 @@ class OpenClawDiscord(commands.Bot):
         intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
         self.order_manager = order_manager
-        self.on_manual_sell = None   # set by main after startup
-        self.on_add_ticker = None    # set by main after startup
-        self.screener = None         # set by main after startup
-        self.settings = None         # set by main after startup
+        self.on_manual_sell = None    # set by main after startup
+        self.on_add_ticker = None     # set by main after startup
+        self.on_backtest_start = None # set by main after startup
+        self.on_backtest_stop = None  # set by main after startup
+        self.screener = None          # set by main after startup
+        self.settings = None          # set by main after startup
         
         try:
             self.channel_id = int(os.getenv("DISCORD_CHANNEL_ID", 0))
@@ -430,5 +469,140 @@ class OpenClawDiscord(commands.Bot):
         embed.add_field(name="Stop Loss", value=_format_currency(stop_loss), inline=True)
         embed.add_field(name="Quantity", value=f"{int(quantity):,}", inline=True)
         embed.add_field(name="Execution Rationale", value=f"```{market_story}```", inline=False)
+
+        await channel.send(embed=embed)
+
+    async def send_backtest_result(self, result: Any, channel_id: int | None = None) -> None:
+        if channel_id:
+            try:
+                channel = self.get_channel(channel_id) or await self.fetch_channel(channel_id)
+            except Exception:
+                channel = await self._get_target_channel()
+        else:
+            channel = await self._get_target_channel()
+
+        if channel is None:
+            logging.error("Backtest result suppressed: channel not found.")
+            return
+
+        # ── Color: green if Sharpe > 1.0 and positive return, amber if marginal, red if poor ──
+        if result.sharpe_ratio >= 1.0 and result.total_return > 0:
+            color = 0x00C851      # green
+            verdict = "VIABLE"
+        elif result.sharpe_ratio >= 0.5 or result.total_return > 0:
+            color = 0xFF8800      # amber
+            verdict = "MARGINAL"
+        else:
+            color = 0xCC0000      # red
+            verdict = "UNDERPERFORMING"
+
+        tickers_str = " · ".join(result.tickers) if result.tickers else "N/A"
+        pnl_dollars = result.final_equity - result.start_equity
+        pnl_sign = "+" if pnl_dollars >= 0 else ""
+        ret_sign = "+" if result.total_return >= 0 else ""
+
+        embed = discord.Embed(
+            title=f"BACKTEST RESULTS  —  {result.duration_days}-Day Replay  [{verdict}]",
+            description=(
+                f"**Tickers:** {tickers_str}\n"
+                f"**Starting Equity:** `${result.start_equity:,.2f}`   →   "
+                f"**Final Equity:** `${result.final_equity:,.2f}`  "
+                f"(`{pnl_sign}${pnl_dollars:,.2f}`)\n"
+                f"⚠️ *Signal: technical indicators only — no LLM/news (unavailable for historical replay)*"
+            ),
+            color=color,
+        )
+
+        # ── Section 1: Return Metrics ──
+        embed.add_field(name="​", value="**— RETURN METRICS —**", inline=False)
+        embed.add_field(
+            name="Total Return",
+            value=f"`{ret_sign}{result.total_return * 100:.2f}%`",
+            inline=True,
+        )
+        embed.add_field(
+            name="Annualised Return",
+            value=f"`{ret_sign}{result.annualised_return * 100:.2f}%`",
+            inline=True,
+        )
+        embed.add_field(name="​", value="​", inline=True)
+
+        # ── Section 2: Risk & Drawdown ──
+        embed.add_field(name="​", value="**— RISK & DRAWDOWN —**", inline=False)
+
+        sharpe_icon = "✅" if result.sharpe_ratio >= 1.0 else ("⚠️" if result.sharpe_ratio >= 0.5 else "❌")
+        embed.add_field(
+            name=f"Sharpe Ratio {sharpe_icon}",
+            value=f"`{result.sharpe_ratio:.3f}`",
+            inline=True,
+        )
+        embed.add_field(
+            name="Sortino Ratio",
+            value=f"`{result.sortino_ratio:.3f}`",
+            inline=True,
+        )
+        embed.add_field(
+            name="Calmar Ratio",
+            value=f"`{result.calmar_ratio:.3f}`",
+            inline=True,
+        )
+
+        dd_icon = "✅" if result.max_drawdown < 0.10 else ("⚠️" if result.max_drawdown < 0.20 else "❌")
+        embed.add_field(
+            name=f"Max Drawdown {dd_icon}",
+            value=f"`{result.max_drawdown * 100:.2f}%`",
+            inline=True,
+        )
+        embed.add_field(
+            name="Avg Drawdown Duration",
+            value=f"`{result.avg_drawdown_duration_days:.1f} days`",
+            inline=True,
+        )
+        embed.add_field(name="​", value="​", inline=True)
+
+        # ── Section 3: Trade Execution ──
+        embed.add_field(name="​", value="**— TRADE EXECUTION —**", inline=False)
+
+        wr_icon = "✅" if result.win_rate >= 0.50 else "⚠️"
+        pf_icon = "✅" if result.profit_factor >= 1.5 else ("⚠️" if result.profit_factor >= 1.0 else "❌")
+        exp_icon = "✅" if result.expectancy > 0 else "❌"
+        pf_str = f"`{result.profit_factor:.2f}`" if result.profit_factor != float("inf") else "`∞`"
+
+        embed.add_field(name="Total Trades", value=f"`{result.total_trades}`", inline=True)
+        embed.add_field(
+            name=f"Win Rate {wr_icon}",
+            value=f"`{result.win_rate * 100:.1f}%`",
+            inline=True,
+        )
+        embed.add_field(name="​", value="​", inline=True)
+
+        embed.add_field(
+            name="Avg Win",
+            value=f"`+${result.avg_win:,.2f}`",
+            inline=True,
+        )
+        embed.add_field(
+            name="Avg Loss",
+            value=f"`-${abs(result.avg_loss):,.2f}`",
+            inline=True,
+        )
+        embed.add_field(name="​", value="​", inline=True)
+
+        embed.add_field(
+            name=f"Profit Factor {pf_icon}",
+            value=pf_str,
+            inline=True,
+        )
+        embed.add_field(
+            name=f"Expectancy / Trade {exp_icon}",
+            value=f"`{'+' if result.expectancy >= 0 else ''}${result.expectancy:,.2f}`",
+            inline=True,
+        )
+        embed.add_field(name="​", value="​", inline=True)
+
+        embed.set_footer(text=(
+            "Fill price = next bar open  ·  Costs not modelled  ·  "
+            "Signal: technical alignment only  ·  Past results ≠ future performance"
+        ))
 
         await channel.send(embed=embed)
