@@ -203,6 +203,7 @@ class BacktestEngine:
     POSITION_PCT = 0.015
     MIN_HOLD_BARS = 3         # 15 minutes before AI-reversal exit allowed
     COOLDOWN_BARS = 3         # 15-minute cooldown after close
+    LLM_COOLDOWN_BARS = 78    # one full trading session between fresh LLM calls per symbol
     MAX_LOOKBACK_5M = 200     # rolling window for indicator computation
     IBKR_TIMEFRAME_PAUSE = 5.0   # seconds between bar-size requests for same symbol
     IBKR_SYMBOL_PAUSE = 12.0     # seconds between symbols — avoids pacing with live subs
@@ -483,6 +484,10 @@ class BacktestEngine:
         last_exit_bar = -1
         entry_confidence = 0.0
 
+        # LLM rate-limiting: cache results by context string + one-per-session cooldown
+        llm_cache: dict[str, tuple[str, float]] = {}
+        last_llm_bar = -self.LLM_COOLDOWN_BARS
+
         n = len(bars_5m)
 
         for i, bar in enumerate(bars_5m):
@@ -596,9 +601,16 @@ class BacktestEngine:
                     continue
                 signals_attempted += 1
 
-                # LLM confirmation: same model + prompt as live, technical context only (no news)
+                # LLM confirmation: cached result → cooldown fresh call → else skip to deterministic
                 tech_ctx = self._build_technical_context(cached_df, window_1h)
-                llm_sig, llm_conf = await self._llm_evaluate(symbol, tech_ctx)
+                if tech_ctx in llm_cache:
+                    llm_sig, llm_conf = llm_cache[tech_ctx]
+                elif (i - last_llm_bar) >= self.LLM_COOLDOWN_BARS:
+                    llm_sig, llm_conf = await self._llm_evaluate(symbol, tech_ctx)
+                    llm_cache[tech_ctx] = (llm_sig, llm_conf)
+                    last_llm_bar = i
+                else:
+                    llm_sig, llm_conf = "NEUTRAL", 0.0
 
                 if llm_sig != "NEUTRAL":
                     # LLM gave a clear verdict — use it
