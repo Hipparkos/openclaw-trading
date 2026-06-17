@@ -151,65 +151,86 @@ class TradingCommands(commands.Cog):
             await ctx.send("Liquidation encountered an error. Check the logs.")
 
     @commands.command(name="add")
-    async def add_ticker(self, ctx, ticker: str = None):
+    async def add_ticker(self, ctx, *, tickers: str = None):
         if not self.bot.settings:
             await ctx.send("Bot settings not available yet.")
             return
-        if not ticker:
-            await ctx.send("Usage: `!add TICKER` — e.g. `!add AAPL`")
+        if not tickers:
+            await ctx.send("Usage: `!add AAPL` or `!add AAPL, NOW, MSFT`")
             return
 
-        symbol = ticker.upper().strip()
-        tickers: list = self.bot.settings.setdefault("tickers", [])
+        symbols = [s.strip().upper() for s in tickers.split(",") if s.strip()]
+        if not symbols:
+            await ctx.send("Usage: `!add AAPL` or `!add AAPL, NOW, MSFT`")
+            return
 
-        if symbol in tickers:
-            embed = discord.Embed(
-                title="Already Watching",
-                description=f"`{symbol}` is already on the watchlist.",
-                color=0xAAAAAA,
-            )
-        else:
-            tickers.append(symbol)
-            embed = discord.Embed(
-                title="Ticker Added",
-                description=f"`{symbol}` added to the watchlist.",
-                color=0x00FF00,
-            )
-            embed.add_field(name="Current Watchlist", value=" | ".join(tickers), inline=False)
+        watchlist: list = self.bot.settings.setdefault("tickers", [])
+        added = []
+        skipped = []
 
-            if callable(getattr(self.bot, "on_add_ticker", None)):
+        for symbol in symbols:
+            if symbol in watchlist:
+                skipped.append(symbol)
+            else:
+                watchlist.append(symbol)
+                added.append(symbol)
+
+        embed = discord.Embed(
+            title="Watchlist Updated",
+            color=0x00FF00 if added else 0xAAAAAA,
+        )
+        if added:
+            embed.add_field(name="Added", value=" | ".join(f"`{s}`" for s in added), inline=False)
+        if skipped:
+            embed.add_field(name="Already on watchlist", value=" | ".join(f"`{s}`" for s in skipped), inline=False)
+        embed.add_field(name="Current Watchlist", value=" | ".join(watchlist), inline=False)
+
+        if added and callable(getattr(self.bot, "on_add_ticker", None)):
+            for symbol in added:
                 asyncio.create_task(self.bot.on_add_ticker(symbol))
-                embed.add_field(name="Data Feed", value="Fetching historical data, ready in ~30s", inline=False)
+            embed.add_field(
+                name="Data Feed",
+                value=f"Fetching data for {len(added)} ticker(s), ready in ~30s",
+                inline=False,
+            )
 
         await ctx.send(embed=embed)
 
     @commands.command(name="remove")
-    async def remove_ticker(self, ctx, ticker: str = None):
+    async def remove_ticker(self, ctx, *, tickers: str = None):
         if not self.bot.settings:
             await ctx.send("Bot settings not available yet.")
             return
-        if not ticker:
-            await ctx.send("Usage: `!remove TICKER` — e.g. `!remove AAPL`")
+        if not tickers:
+            await ctx.send("Usage: `!remove AAPL` or `!remove AAPL, NOW, MSFT`")
             return
 
-        symbol = ticker.upper().strip()
-        tickers: list = self.bot.settings.get("tickers", [])
+        symbols = [s.strip().upper() for s in tickers.split(",") if s.strip()]
+        if not symbols:
+            await ctx.send("Usage: `!remove AAPL` or `!remove AAPL, NOW, MSFT`")
+            return
 
-        if symbol not in tickers:
-            embed = discord.Embed(
-                title="Not Found",
-                description=f"`{symbol}` is not on the watchlist.",
-                color=0xAAAAAA,
-            )
-        else:
-            tickers.remove(symbol)
-            embed = discord.Embed(
-                title="Ticker Removed",
-                description=f"`{symbol}` removed from the watchlist.",
-                color=0xFF6600,
-            )
-            remaining = " | ".join(tickers) if tickers else "_(empty)_"
-            embed.add_field(name="Current Watchlist", value=remaining, inline=False)
+        watchlist: list = self.bot.settings.get("tickers", [])
+        removed = []
+        not_found = []
+
+        for symbol in symbols:
+            if symbol in watchlist:
+                watchlist.remove(symbol)
+                removed.append(symbol)
+            else:
+                not_found.append(symbol)
+
+        embed = discord.Embed(
+            title="Watchlist Updated",
+            color=0xFF6600 if removed else 0xAAAAAA,
+        )
+        if removed:
+            embed.add_field(name="Removed", value=" | ".join(f"`{s}`" for s in removed), inline=False)
+        if not_found:
+            embed.add_field(name="Not on watchlist", value=" | ".join(f"`{s}`" for s in not_found), inline=False)
+        remaining = " | ".join(watchlist) if watchlist else "_(empty)_"
+        embed.add_field(name="Current Watchlist", value=remaining, inline=False)
 
         await ctx.send(embed=embed)
 
@@ -585,16 +606,13 @@ class OpenClawDiscord(commands.Bot):
             value=f"`{result.sharpe_ratio:.3f}`",
             inline=True,
         )
+        sortino_icon = "✅" if result.sortino_ratio >= 1.0 else ("⚠️" if result.sortino_ratio >= 0.5 else "❌")
         embed.add_field(
-            name="Sortino Ratio",
+            name=f"Sortino Ratio {sortino_icon}",
             value=f"`{result.sortino_ratio:.3f}`",
             inline=True,
         )
-        embed.add_field(
-            name="Calmar Ratio",
-            value=f"`{result.calmar_ratio:.3f}`",
-            inline=True,
-        )
+        embed.add_field(name="​", value="​", inline=True)
 
         dd_icon = "✅" if result.max_drawdown < 0.10 else ("⚠️" if result.max_drawdown < 0.20 else "❌")
         embed.add_field(

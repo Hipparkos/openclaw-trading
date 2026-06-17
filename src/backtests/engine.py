@@ -201,7 +201,7 @@ def _hourly_bars_up_to(bars_1h: list[BarData], cutoff: datetime) -> list[BarData
 class BacktestEngine:
     # Mirror the live trading constants exactly
     WARMUP_BARS = 50
-    SIGNAL_THRESHOLD = 2      # out of up to 5 aligned indicators
+    SIGNAL_THRESHOLD = 3      # out of 4 indicators — 3/4 required for higher win rate
     STOP_LOSS_PCT = 0.02
     ATR_TRAIL_MULT = 2.0
     TAKE_PROFIT_ATR_MULT = 3.0
@@ -341,6 +341,19 @@ class BacktestEngine:
 
         if hourly_direction == "NEUTRAL":
             return "NEUTRAL", 0.0
+
+        # ── Volume confirmation gate ─────────────────────────────────────────────
+        # Low-volume bars produce unreliable breakouts — skip them
+        vol = row.get("volume")
+        vol_sma = row.get("volume_sma_20")
+        if vol is not None and vol_sma is not None:
+            try:
+                vol_f, vsma_f = float(vol), float(vol_sma)
+                if vsma_f > 0 and not math.isnan(vol_f) and not math.isnan(vsma_f):
+                    if vol_f / vsma_f < 0.8:
+                        return "NEUTRAL", 0.0
+            except (TypeError, ValueError):
+                pass
 
         # ── 5m indicator votes (4 signals) ──────────────────────────────────────
         # 1. RSI momentum
