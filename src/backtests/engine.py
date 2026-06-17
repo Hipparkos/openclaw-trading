@@ -32,6 +32,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import numpy as np
+import pandas as pd
 from ib_insync import Stock
 
 from data.data_models import BarData
@@ -286,6 +287,7 @@ class BacktestEngine:
         window_5m: list[BarData],
         window_1h: list[BarData],
         cached_df=None,
+        cached_df_1h=None,
     ) -> tuple[str, float]:
         """
         Pure indicator-alignment signal.  Mirrors what the LLM synthesises from
@@ -294,6 +296,7 @@ class BacktestEngine:
         Returns (direction, confidence) where confidence is the fraction of
         indicators that voted for the winning side (0.0–1.0).
         cached_df: pre-computed result of calculate_all(window_5m) to avoid recomputing.
+        cached_df_1h: pre-computed 1h DataFrame slice — skips calculate_all(window_1h).
         """
         if len(window_5m) < self.WARMUP_BARS:
             return "NEUTRAL", 0.0
@@ -316,24 +319,25 @@ class BacktestEngine:
 
         # ── Hard gate: 1h macro trend must be clear and unambiguous ────────────
         # Any entry that opposes the hourly direction is rejected outright.
-        # NEUTRAL hourly (price straddling SMA_20) also blocks all entries.
+        # NEUTRAL hourly (price straddling SMA_50) also blocks all entries.
         hourly_direction = "NEUTRAL"
-        if len(window_1h) >= 20:
-            df_1h = self._calc.calculate_all(window_1h)
-            if not df_1h.empty:
-                h = df_1h.iloc[-1]
-                h_close = h.get("close")
-                h_sma50 = h.get("sma_50")
-                if h_close is not None and h_sma50 is not None:
-                    try:
-                        hc, hs = float(h_close), float(h_sma50)
-                        if not (math.isnan(hc) or math.isnan(hs)):
-                            if hc > hs:
-                                hourly_direction = "BULLISH"
-                            elif hc < hs:
-                                hourly_direction = "BEARISH"
-                    except (TypeError, ValueError):
-                        pass
+        df_1h = cached_df_1h if cached_df_1h is not None else (
+            self._calc.calculate_all(window_1h) if len(window_1h) >= 50 else pd.DataFrame()
+        )
+        if not df_1h.empty:
+            h = df_1h.iloc[-1]
+            h_close = h.get("close")
+            h_sma50 = h.get("sma_50")
+            if h_close is not None and h_sma50 is not None:
+                try:
+                    hc, hs = float(h_close), float(h_sma50)
+                    if not (math.isnan(hc) or math.isnan(hs)):
+                        if hc > hs:
+                            hourly_direction = "BULLISH"
+                        elif hc < hs:
+                            hourly_direction = "BEARISH"
+                except (TypeError, ValueError):
+                    pass
 
         if hourly_direction == "NEUTRAL":
             return "NEUTRAL", 0.0
@@ -383,14 +387,12 @@ class BacktestEngine:
 
     # ── LLM evaluation ─────────────────────────────────────────────────────────
 
-    def _build_technical_context(self, cached_df, window_1h: list[BarData]) -> str:
+    def _build_technical_context(self, cached_df, df_1h=None) -> str:
         """Build the same technical_context string that live trading sends to the LLM."""
         tech_5m = self._strategy.evaluate_signals(cached_df)
         hourly_trend = ""
-        if len(window_1h) >= 2:
-            df_1h = self._calc.calculate_all(window_1h)
-            if df_1h is not None and not df_1h.empty:
-                hourly_trend = self._strategy.evaluate_hourly_trend(df_1h)
+        if df_1h is not None and not df_1h.empty:
+            hourly_trend = self._strategy.evaluate_hourly_trend(df_1h)
         base = f"{hourly_trend} | 5m: {tech_5m}" if hourly_trend else tech_5m
         regime_ctx = self._strategy.evaluate_regime(cached_df)
         return f"{base} | {regime_ctx}" if regime_ctx else base
@@ -518,6 +520,10 @@ class BacktestEngine:
         llm_cache: dict[str, tuple[str, float]] = {}
         last_llm_bar = -self.LLM_COOLDOWN_BARS
 
+        # Pre-compute full indicator DataFrames once — sliced per bar, no per-bar recalculation
+        full_df_5m = self._calc.calculate_all(bars_5m) if bars_5m else pd.DataFrame()
+        full_df_1h = self._calc.calculate_all(bars_1h) if bars_1h else pd.DataFrame()
+
         n = len(bars_5m)
 
         for i, bar in enumerate(bars_5m):
@@ -529,15 +535,17 @@ class BacktestEngine:
             current_time = _to_utc(bar.timestamp)
             fill_price = float(bars_5m[i + 1].open)
 
-            # Rolling windows — no future bars
+            # Rolling windows — no future bars (list used only for length checks)
             window_5m = bars_5m[max(0, i - self.MAX_LOOKBACK_5M + 1): i + 1]
             window_1h = _hourly_bars_up_to(bars_1h, current_time)
 
-            # Compute indicators ONCE per bar — reused for ATR and signal
+            # Slice pre-computed DataFrames — O(1), no recalculation
             current_atr = 0.0
             cached_df = None
-            if len(window_5m) >= self.WARMUP_BARS:
-                cached_df = self._calc.calculate_all(window_5m)
+            df_1h_slice = full_df_1h.iloc[:len(window_1h)] if not full_df_1h.empty else pd.DataFrame()
+            if i >= self.WARMUP_BARS - 1 and not full_df_5m.empty:
+                start = max(0, i - self.MAX_LOOKBACK_5M + 1)
+                cached_df = full_df_5m.iloc[start: i + 1]
                 if not cached_df.empty:
                     atr_val = cached_df.iloc[-1].get("atr_14")
                     if atr_val is not None:
@@ -586,7 +594,7 @@ class BacktestEngine:
 
                 # 4. Signal reversal (minimum hold period passed)
                 if exit_reason is None and bars_held >= self.MIN_HOLD_BARS:
-                    sig, _ = self._compute_signal(window_5m, window_1h)
+                    sig, _ = self._compute_signal(window_5m, window_1h, cached_df_1h=df_1h_slice)
                     if direction == "LONG" and sig == "BEARISH":
                         exit_reason = "Signal reversal"
                     elif direction == "SHORT" and sig == "BULLISH":
@@ -626,13 +634,13 @@ class BacktestEngine:
                     continue
 
                 # Pre-filter: fast indicator vote — avoids LLM call on bars with no activity
-                sig_det, conf_det = self._compute_signal(window_5m, window_1h, cached_df=cached_df)
+                sig_det, conf_det = self._compute_signal(window_5m, window_1h, cached_df=cached_df, cached_df_1h=df_1h_slice)
                 if sig_det == "NEUTRAL":
                     continue
                 signals_attempted += 1
 
                 # LLM confirmation: cached result → cooldown fresh call → else skip to deterministic
-                tech_ctx = self._build_technical_context(cached_df, window_1h)
+                tech_ctx = self._build_technical_context(cached_df, df_1h=df_1h_slice)
                 if tech_ctx in llm_cache:
                     llm_sig, llm_conf = llm_cache[tech_ctx]
                 elif (i - last_llm_bar) >= self.LLM_COOLDOWN_BARS:
