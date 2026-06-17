@@ -82,6 +82,8 @@ class BacktestResult:
     win_rate: float = 0.0
     avg_win: float = 0.0
     avg_loss: float = 0.0
+    biggest_win: float = 0.0
+    biggest_loss: float = 0.0
     profit_factor: float = 0.0
     expectancy: float = 0.0
     total_trades: int = 0
@@ -164,6 +166,8 @@ class BacktestResult:
         self.win_rate = len(wins) / self.total_trades
         self.avg_win = sum(wins) / len(wins) if wins else 0.0
         self.avg_loss = sum(losses) / len(losses) if losses else 0.0
+        self.biggest_win = max(wins) if wins else 0.0
+        self.biggest_loss = min(losses) if losses else 0.0
         sum_loss = abs(sum(losses)) if losses else 0.0
         self.profit_factor = sum(wins) / sum_loss if sum_loss > 0 else float("inf")
         self.expectancy = (self.win_rate * self.avg_win) + ((1.0 - self.win_rate) * self.avg_loss)
@@ -371,7 +375,9 @@ class BacktestEngine:
             df_1h = self._calc.calculate_all(window_1h)
             if df_1h is not None and not df_1h.empty:
                 hourly_trend = self._strategy.evaluate_hourly_trend(df_1h)
-        return f"{hourly_trend} | 5m: {tech_5m}" if hourly_trend else tech_5m
+        base = f"{hourly_trend} | 5m: {tech_5m}" if hourly_trend else tech_5m
+        regime_ctx = self._strategy.evaluate_regime(cached_df)
+        return f"{base} | {regime_ctx}" if regime_ctx else base
 
     async def _llm_evaluate(
         self,
@@ -388,7 +394,15 @@ class BacktestEngine:
             "No news context is available for this replay — evaluate based on technical indicators only.\n\n"
             "### ANALYTICAL FRAMEWORK\n"
             "Assess: trend (moving averages), momentum (RSI, MACD), mean-reversion (Bollinger Bands), "
-            "and price vs VWAP. Rate conviction 0.5 to 1.0 when indicators clearly align in one direction. "
+            "price vs VWAP, and market regime.\n"
+            "REGIME RULES:\n"
+            "  - RANGING (ADX<20): indicators are noisy — only trade extreme RSI or clear BB touches; "
+            "prefer NEUTRAL unless the setup is very clean.\n"
+            "  - DEVELOPING (ADX 20-25): emerging trend — require at least two confirming signals.\n"
+            "  - TRENDING (ADX≥25): follow the trend direction; momentum signals carry high weight.\n"
+            "VOLUME RULES: Low volume (<0.7× avg) weakens any signal — lower confidence or go NEUTRAL.\n"
+            "SESSION RULES: OPEN and CLOSE sessions have elevated noise — require stronger alignment.\n"
+            "Rate conviction 0.5 to 1.0 when indicators clearly align. "
             "Output NEUTRAL when indicators conflict or the setup is ambiguous.\n\n"
             "### STRICT OUTPUT PROTOCOL\n"
             "Output ONLY raw, unformatted JSON — no markdown, no explanation:\n"

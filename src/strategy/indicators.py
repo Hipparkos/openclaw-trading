@@ -63,4 +63,10 @@ class IndicatorCalculator:
 
         df["atr_14"] = ta.atr(df["high"], df["low"], df["close"], length=14)
 
+        adx_result = ta.adx(df["high"], df["low"], df["close"], length=14)
+        if adx_result is not None:
+            df = df.join(adx_result)
+
+        df["volume_sma_20"] = ta.sma(df["volume"], length=20)
+
         return df

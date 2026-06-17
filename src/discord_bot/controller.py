@@ -635,6 +635,16 @@ class OpenClawDiscord(commands.Bot):
             value=f"`-${abs(result.avg_loss):,.2f}`",
             inline=True,
         )
+        embed.add_field(
+            name="Biggest Win",
+            value=f"`+${result.biggest_win:,.2f}`",
+            inline=True,
+        )
+        embed.add_field(
+            name="Biggest Loss",
+            value=f"`-${abs(result.biggest_loss):,.2f}`",
+            inline=True,
+        )
         embed.add_field(name="​", value="​", inline=True)
 
         embed.add_field(

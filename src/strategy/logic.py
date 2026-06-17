@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import datetime as _dt
+
 import pandas as pd
 
 
@@ -73,3 +75,70 @@ class StrategyEngine:
             f"and upper {_format_value(latest_row.get(bbu_col)) if bbu_col else 'N/A'}. "
             f"The MACD is {_format_value(latest_row.get('MACD_6_20_9'))} and the Signal is {_format_value(latest_row.get('MACDs_6_20_9'))}."
         )
+
+    def evaluate_regime(self, df: pd.DataFrame) -> str:
+        """Return a concise market-regime string for the LLM prompt.
+
+        Covers three dimensions:
+          • Trend strength  — ADX: RANGING (<20) / DEVELOPING (20-25) / TRENDING (≥25)
+          • Volume context  — current bar volume relative to 20-bar average
+          • Session timing  — OPEN / MID_DAY / CLOSE in US Eastern time
+        """
+        if df is None or df.empty:
+            return ""
+
+        latest = df.iloc[-1]
+        parts: list[str] = []
+
+        # ── Trend strength (ADX) ────────────────────────────────────────────────
+        adx_col = next((c for c in df.columns if c.startswith("ADX_")), None)
+        if adx_col:
+            adx_val = latest.get(adx_col)
+            if adx_val is not None and not pd.isna(adx_val):
+                adx = float(adx_val)
+                if adx >= 25:
+                    label = "TRENDING"
+                elif adx >= 20:
+                    label = "DEVELOPING"
+                else:
+                    label = "RANGING"
+                parts.append(f"{label} (ADX={adx:.0f})")
+
+        # ── Volume relative to 20-bar average ───────────────────────────────────
+        vol = latest.get("volume")
+        vol_avg = latest.get("volume_sma_20")
+        if (
+            vol is not None and vol_avg is not None
+            and not pd.isna(vol) and not pd.isna(vol_avg)
+            and float(vol_avg) > 0
+        ):
+            ratio = float(vol) / float(vol_avg)
+            if ratio >= 1.5:
+                vol_label = f"High ({ratio:.1f}×)"
+            elif ratio >= 0.7:
+                vol_label = f"Normal ({ratio:.1f}×)"
+            else:
+                vol_label = f"Low ({ratio:.1f}×)"
+            parts.append(f"Volume: {vol_label}")
+
+        # ── Session timing (US Eastern) ─────────────────────────────────────────
+        try:
+            from zoneinfo import ZoneInfo  # stdlib Python 3.9+
+            ET = ZoneInfo("America/New_York")
+            ts = df.index[-1]
+            if hasattr(ts, "tzinfo") and ts.tzinfo is not None:
+                ts_et = ts.astimezone(ET)
+            else:
+                ts_et = ts.replace(tzinfo=_dt.timezone.utc).astimezone(ET)
+            total_min = ts_et.hour * 60 + ts_et.minute
+            if total_min <= 10 * 60:           # up to 10:00 ET
+                session = "OPEN"
+            elif total_min >= 15 * 60 + 30:    # 15:30 ET onward
+                session = "CLOSE"
+            else:
+                session = "MID_DAY"
+            parts.append(f"Session: {session}")
+        except Exception:
+            pass
+
+        return "Regime: " + ", ".join(parts) if parts else ""

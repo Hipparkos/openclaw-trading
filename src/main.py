@@ -387,8 +387,13 @@ async def main() -> None:
                     if not df_1h.empty:
                         hourly_trend = await asyncio.to_thread(strategy_engine.evaluate_hourly_trend, df_1h)
 
-                # Combine 1h trend + 5m signals
+                # Market regime: ADX trend strength, volume, session timing
+                regime_ctx = await asyncio.to_thread(strategy_engine.evaluate_regime, df_5m)
+
+                # Combine all context layers
                 technical_context = f"{hourly_trend} | 5m: {technical_5m}" if hourly_trend else technical_5m
+                if regime_ctx:
+                    technical_context = f"{technical_context} | {regime_ctx}"
 
                 current_price = 0.0
                 latest_close = df_5m.iloc[-1].get("close")
