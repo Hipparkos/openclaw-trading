@@ -389,12 +389,12 @@ async def main() -> None:
                         hourly_trend = await asyncio.to_thread(strategy_engine.evaluate_hourly_trend, df_1h)
                         h_row = df_1h.iloc[-1]
                         h_close = h_row.get("close")
-                        h_sma20 = h_row.get("sma_20")
-                        if h_close is not None and h_sma20 is not None:
+                        h_sma50 = h_row.get("sma_50")
+                        if h_close is not None and h_sma50 is not None:
                             try:
-                                if float(h_close) > float(h_sma20):
+                                if float(h_close) > float(h_sma50):
                                     hourly_direction = "BULLISH"
-                                elif float(h_close) < float(h_sma20):
+                                elif float(h_close) < float(h_sma50):
                                     hourly_direction = "BEARISH"
                             except (TypeError, ValueError):
                                 pass
@@ -742,7 +742,7 @@ async def main() -> None:
                             continue
 
                         confidence = abs(sentiment_score)
-                        if confidence < 0.65:
+                        if confidence < 0.60:
                             continue
 
                         signal_direction = "BULLISH" if sentiment_score > 0 else "BEARISH"

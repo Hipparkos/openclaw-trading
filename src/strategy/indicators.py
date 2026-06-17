@@ -52,6 +52,7 @@ class IndicatorCalculator:
         df["sma_8"] = ta.sma(df["close"], length=8)
         df["sma_13"] = ta.sma(df["close"], length=13)
         df["sma_20"] = ta.sma(df["close"], length=20)
+        df["sma_50"] = ta.sma(df["close"], length=50)
 
         df["ema_5"] = ta.ema(df["close"], length=5)
         df["ema_9"] = ta.ema(df["close"], length=9)

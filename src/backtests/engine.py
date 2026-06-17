@@ -323,10 +323,10 @@ class BacktestEngine:
             if not df_1h.empty:
                 h = df_1h.iloc[-1]
                 h_close = h.get("close")
-                h_sma20 = h.get("sma_20")
-                if h_close is not None and h_sma20 is not None:
+                h_sma50 = h.get("sma_50")
+                if h_close is not None and h_sma50 is not None:
                     try:
-                        hc, hs = float(h_close), float(h_sma20)
+                        hc, hs = float(h_close), float(h_sma50)
                         if not (math.isnan(hc) or math.isnan(hs)):
                             if hc > hs:
                                 hourly_direction = "BULLISH"
@@ -645,7 +645,7 @@ class BacktestEngine:
                 if llm_sig != "NEUTRAL":
                     # LLM gave a clear verdict — use it
                     sig, conf = llm_sig, llm_conf
-                    if conf < 0.65:
+                    if conf < 0.60:
                         continue
                 else:
                     # LLM failed or returned neutral — fall back to deterministic pre-filter
