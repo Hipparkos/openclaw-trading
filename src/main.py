@@ -366,15 +366,15 @@ async def main() -> None:
         async def _stream_news() -> None:
             logger.info("Starting news stream...")
 
-            async def _build_trade_snapshot(symbol: str) -> tuple[str, float, float]:
+            async def _build_trade_snapshot(symbol: str) -> tuple[str, float, float, str]:
                 bars_5m = list(client.data_buffer.get(symbol, {}).get("5 mins", []))
                 if len(bars_5m) < 2:
-                    return "Insufficient 5-minute market data yet.", 0.0, 0.0
+                    return "Insufficient 5-minute market data yet.", 0.0, 0.0, "NEUTRAL"
 
                 indicator_calculator = IndicatorCalculator()
                 df_5m = await asyncio.to_thread(indicator_calculator.calculate_all, bars_5m)
                 if df_5m.empty:
-                    return "Technical dataframe is empty.", 0.0, 0.0
+                    return "Technical dataframe is empty.", 0.0, 0.0, "NEUTRAL"
 
                 strategy_engine = StrategyEngine()
                 technical_5m = await asyncio.to_thread(strategy_engine.evaluate_signals, df_5m)
@@ -382,10 +382,22 @@ async def main() -> None:
                 # Evaluate 1-hour trend context
                 bars_1h = list(client.data_buffer.get(symbol, {}).get("1 hour", []))
                 hourly_trend = ""
+                hourly_direction = "NEUTRAL"
                 if len(bars_1h) >= 2:
                     df_1h = await asyncio.to_thread(indicator_calculator.calculate_all, bars_1h)
                     if not df_1h.empty:
                         hourly_trend = await asyncio.to_thread(strategy_engine.evaluate_hourly_trend, df_1h)
+                        h_row = df_1h.iloc[-1]
+                        h_close = h_row.get("close")
+                        h_sma20 = h_row.get("sma_20")
+                        if h_close is not None and h_sma20 is not None:
+                            try:
+                                if float(h_close) > float(h_sma20):
+                                    hourly_direction = "BULLISH"
+                                elif float(h_close) < float(h_sma20):
+                                    hourly_direction = "BEARISH"
+                            except (TypeError, ValueError):
+                                pass
 
                 # Market regime: ADX trend strength, volume, session timing
                 regime_ctx = await asyncio.to_thread(strategy_engine.evaluate_regime, df_5m)
@@ -412,7 +424,7 @@ async def main() -> None:
                 except (TypeError, ValueError):
                     current_atr = 0.0
 
-                return technical_context, current_price, current_atr
+                return technical_context, current_price, current_atr, hourly_direction
 
             def _trade_outcome(entry_price: float, exit_price: float) -> str:
                 if entry_price <= 0.0 or exit_price <= 0.0:
@@ -615,7 +627,7 @@ async def main() -> None:
                 for symbol in settings["tickers"]:
                     if settings.get("backtest_mode"):
                         break
-                    technical_context, current_price, current_atr = await _build_trade_snapshot(symbol)
+                    technical_context, current_price, current_atr, hourly_direction = await _build_trade_snapshot(symbol)
 
                     holding_quantity = order_manager.get_position(symbol)
                     is_holding = holding_quantity != 0.0
@@ -730,10 +742,18 @@ async def main() -> None:
                             continue
 
                         confidence = abs(sentiment_score)
-                        if confidence < 0.5:
+                        if confidence < 0.65:
                             continue
 
                         signal_direction = "BULLISH" if sentiment_score > 0 else "BEARISH"
+
+                        # Trend alignment gate — reject signals that oppose the hourly macro direction
+                        if signal_direction != hourly_direction:
+                            logger.info(
+                                "Trend gate: %s %s rejected — hourly direction is %s",
+                                symbol, signal_direction, hourly_direction,
+                            )
+                            continue
 
                         await _route_trade(
                             symbol=news_item.symbol,

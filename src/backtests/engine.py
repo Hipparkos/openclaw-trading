@@ -314,6 +314,31 @@ class BacktestEngine:
 
         close = _v("close")
 
+        # ── Hard gate: 1h macro trend must be clear and unambiguous ────────────
+        # Any entry that opposes the hourly direction is rejected outright.
+        # NEUTRAL hourly (price straddling SMA_20) also blocks all entries.
+        hourly_direction = "NEUTRAL"
+        if len(window_1h) >= 20:
+            df_1h = self._calc.calculate_all(window_1h)
+            if not df_1h.empty:
+                h = df_1h.iloc[-1]
+                h_close = h.get("close")
+                h_sma20 = h.get("sma_20")
+                if h_close is not None and h_sma20 is not None:
+                    try:
+                        hc, hs = float(h_close), float(h_sma20)
+                        if not (math.isnan(hc) or math.isnan(hs)):
+                            if hc > hs:
+                                hourly_direction = "BULLISH"
+                            elif hc < hs:
+                                hourly_direction = "BEARISH"
+                    except (TypeError, ValueError):
+                        pass
+
+        if hourly_direction == "NEUTRAL":
+            return "NEUTRAL", 0.0
+
+        # ── 5m indicator votes (4 signals) ──────────────────────────────────────
         # 1. RSI momentum
         rsi = _v("rsi_14")
         if rsi is not None:
@@ -338,32 +363,23 @@ class BacktestEngine:
             components += 1
             score += 1 if close > sma5 else (-1 if close < sma5 else 0)
 
-        # 5. 1h structural trend (price vs SMA_20 on hourly frame)
-        if len(window_1h) >= 20:
-            df_1h = self._calc.calculate_all(window_1h)
-            if not df_1h.empty:
-                h = df_1h.iloc[-1]
-                h_close = h.get("close")
-                h_sma20 = h.get("sma_20")
-                if h_close is not None and h_sma20 is not None:
-                    try:
-                        hc, hs = float(h_close), float(h_sma20)
-                        if not (math.isnan(hc) or math.isnan(hs)):
-                            components += 1
-                            score += 1 if hc > hs else (-1 if hc < hs else 0)
-                    except (TypeError, ValueError):
-                        pass
-
         if components == 0:
             return "NEUTRAL", 0.0
 
         confidence = abs(score) / components
 
         if score >= self.SIGNAL_THRESHOLD:
-            return "BULLISH", confidence
-        if score <= -self.SIGNAL_THRESHOLD:
-            return "BEARISH", confidence
-        return "NEUTRAL", 0.0
+            direction = "BULLISH"
+        elif score <= -self.SIGNAL_THRESHOLD:
+            direction = "BEARISH"
+        else:
+            return "NEUTRAL", 0.0
+
+        # ── Trend alignment check ────────────────────────────────────────────────
+        if direction != hourly_direction:
+            return "NEUTRAL", 0.0
+
+        return direction, confidence
 
     # ── LLM evaluation ─────────────────────────────────────────────────────────
 
@@ -629,12 +645,12 @@ class BacktestEngine:
                 if llm_sig != "NEUTRAL":
                     # LLM gave a clear verdict — use it
                     sig, conf = llm_sig, llm_conf
-                    if conf < 0.5:
+                    if conf < 0.65:
                         continue
                 else:
                     # LLM failed or returned neutral — fall back to deterministic pre-filter
                     sig, conf = sig_det, conf_det
-                    if conf < 0.4:
+                    if conf < 0.55:
                         continue
 
                 qty = max(1, int((equity * self.POSITION_PCT * conf) / fill_price))
