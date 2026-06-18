@@ -40,6 +40,19 @@ from data.ibkr_client import IBKRClient
 from strategy.indicators import IndicatorCalculator
 from strategy.logic import StrategyEngine
 
+# Optional PPO policy — only loaded when models/ppo_policy.zip exists
+try:
+    from stable_baselines3 import PPO as _SB3PPO
+    _PPO_AVAILABLE = True
+except ImportError:
+    _PPO_AVAILABLE = False
+
+try:
+    from ppo.environment import build_obs as _ppo_build_obs, build_static_obs as _ppo_build_static
+    _PPO_ENV_AVAILABLE = True
+except ImportError:
+    _PPO_ENV_AVAILABLE = False
+
 
 # ── Data structures ────────────────────────────────────────────────────────────
 
@@ -219,6 +232,7 @@ class BacktestEngine:
         start_equity: float = 100_000.0,
         commission_per_trade: float = 1.50,
         ollama_url: str = "http://openclaw_ollama:11434",
+        ppo_policy_path: str | None = None,
     ) -> None:
         self.client = client
         self.start_equity = start_equity
@@ -227,6 +241,14 @@ class BacktestEngine:
         self.logger = logging.getLogger("BacktestEngine")
         self._calc = IndicatorCalculator()
         self._strategy = StrategyEngine()
+
+        self.ppo_policy = None
+        if ppo_policy_path and _PPO_AVAILABLE and _PPO_ENV_AVAILABLE:
+            try:
+                self.ppo_policy = _SB3PPO.load(ppo_policy_path)
+                self.logger.info("PPO policy loaded from %s", ppo_policy_path)
+            except Exception as exc:
+                self.logger.warning("PPO policy load failed (%s) — using confidence threshold", exc)
 
     # ── Historical data ────────────────────────────────────────────────────────
 
@@ -432,7 +454,6 @@ class BacktestEngine:
             "  - DEVELOPING (ADX 20-25): emerging trend — require at least two confirming signals.\n"
             "  - TRENDING (ADX≥25): follow the trend direction; momentum signals carry high weight.\n"
             "VOLUME RULES: Low volume (<0.7× avg) weakens any signal — lower confidence or go NEUTRAL.\n"
-            "SESSION RULES: OPEN and CLOSE sessions have elevated noise — require stronger alignment.\n"
             "Rate conviction 0.5 to 1.0 when indicators clearly align. "
             "Output NEUTRAL when indicators conflict or the setup is ambiguous.\n\n"
             "### STRICT OUTPUT PROTOCOL\n"
@@ -528,6 +549,7 @@ class BacktestEngine:
         entry_bar_idx = -1
         last_exit_bar = -1
         entry_confidence = 0.0
+        recent_pnls: list[float] = []   # last N closed-trade PnLs for PPO state vector
 
         # LLM rate-limiting: cache results by context string + one-per-session cooldown
         llm_cache: dict[str, tuple[str, float]] = {}
@@ -623,6 +645,7 @@ class BacktestEngine:
                         pnl_pct = (entry_price - exit_price) / entry_price
 
                     equity += pnl
+                    recent_pnls.append(pnl)
                     trades.append(TradeRecord(
                         symbol=symbol,
                         direction=direction,
@@ -663,16 +686,56 @@ class BacktestEngine:
                 else:
                     llm_sig, llm_conf = "NEUTRAL", 0.0
 
+                # Resolve the effective signal and confidence
                 if llm_sig != "NEUTRAL":
-                    # LLM gave a clear verdict — use it
                     sig, conf = llm_sig, llm_conf
-                    if conf < 0.60:
+                else:
+                    sig, conf = sig_det, conf_det
+
+                if self.ppo_policy is not None and _PPO_ENV_AVAILABLE and cached_df is not None:
+                    # PPO replaces the fixed confidence threshold.
+                    # Build the state vector and ask the policy whether to trade.
+                    h_close, h_sma50 = 0.0, 0.0
+                    if not df_1h_slice.empty:
+                        try:
+                            h_row = df_1h_slice.iloc[-1]
+                            h_close = float(h_row.get("close") or 0.0)
+                            h_sma50 = float(h_row.get("sma_50") or 0.0)
+                        except (TypeError, ValueError):
+                            pass
+                    static = _ppo_build_static(cached_df.iloc[-1], h_close, h_sma50)
+
+                    unreal = 0.0
+                    if in_position and entry_price > 0:
+                        unreal = (
+                            (current_price - entry_price) / entry_price
+                            if direction == "LONG"
+                            else (entry_price - current_price) / entry_price
+                        )
+                    recent_norm = 0.0
+                    if recent_pnls:
+                        avg = sum(recent_pnls[-3:]) / min(len(recent_pnls), 3)
+                        recent_norm = max(-1.0, min(1.0, avg / (starting_equity * 0.01)))
+
+                    llm_dir = (
+                        1.0 if sig == "BULLISH" else (-1.0 if sig == "BEARISH" else 0.0)
+                    )
+                    obs = _ppo_build_obs(static, conf, llm_dir, in_position, unreal, recent_norm)
+                    action, _ = self.ppo_policy.predict(obs, deterministic=True)
+
+                    if int(action) == 0:
+                        continue
+                    ppo_dir = "BULLISH" if int(action) == 1 else "BEARISH"
+                    if ppo_dir != sig:
                         continue
                 else:
-                    # LLM failed or returned neutral — fall back to deterministic pre-filter
-                    sig, conf = sig_det, conf_det
-                    if conf < 0.55:
-                        continue
+                    # No PPO — fall back to fixed confidence thresholds
+                    if llm_sig != "NEUTRAL":
+                        if conf < 0.60:
+                            continue
+                    else:
+                        if conf < 0.55:
+                            continue
 
                 qty = max(1, int((equity * self.POSITION_PCT * conf) / fill_price))
                 direction = "LONG" if sig == "BULLISH" else "SHORT"

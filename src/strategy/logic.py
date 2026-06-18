@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import datetime as _dt
-
 import pandas as pd
 
 
@@ -120,25 +118,5 @@ class StrategyEngine:
             else:
                 vol_label = f"Low ({ratio:.1f}×)"
             parts.append(f"Volume: {vol_label}")
-
-        # ── Session timing (US Eastern) ─────────────────────────────────────────
-        try:
-            from zoneinfo import ZoneInfo  # stdlib Python 3.9+
-            ET = ZoneInfo("America/New_York")
-            ts = df.index[-1]
-            if hasattr(ts, "tzinfo") and ts.tzinfo is not None:
-                ts_et = ts.astimezone(ET)
-            else:
-                ts_et = ts.replace(tzinfo=_dt.timezone.utc).astimezone(ET)
-            total_min = ts_et.hour * 60 + ts_et.minute
-            if total_min <= 10 * 60:           # up to 10:00 ET
-                session = "OPEN"
-            elif total_min >= 15 * 60 + 30:    # 15:30 ET onward
-                session = "CLOSE"
-            else:
-                session = "MID_DAY"
-            parts.append(f"Session: {session}")
-        except Exception:
-            pass
 
         return "Regime: " + ", ".join(parts) if parts else ""

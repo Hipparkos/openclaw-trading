@@ -12,3 +12,5 @@ yfinance>=0.2.37
 discord.py==2.3.2
 numpy>=1.26.0,<3.0.0
 requests>=2.31.0
+gymnasium>=0.29.0,<1.0.0
+stable-baselines3>=2.3.0,<3.0.0

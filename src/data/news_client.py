@@ -308,7 +308,7 @@ class NewsClient:
             "1. CONTEXT: Evaluate the 'Technical Setup' (moving averages, momentum, Bollinger Bands, VWAP, "
             "and market regime). REGIME RULES: RANGING (ADX<20) = noisy, prefer NEUTRAL unless setup is very clean; "
             "TRENDING (ADX≥25) = follow the trend, momentum signals carry high weight. "
-            "Low volume (<0.7× avg) weakens any signal. OPEN/CLOSE sessions require stronger alignment.\n"
+            "Low volume (<0.7× avg) weakens any signal.\n"
             "2. CATALYST: Evaluate the 'Headline' for actionable institutional impact (earnings, macro shifts, supply chain).\n"
             "3. ALIGNMENT LOGIC:\n"
             "   - Synergy: rate conviction 0.5 to 1.0 based on how clearly catalyst confirms trend. \n"
