@@ -141,7 +141,9 @@ class TradingCommands(commands.Cog):
             color=0xFFAA00,
         )
         await ctx.send(embed=embed)
-        asyncio.create_task(self.bot.on_ppo_cache(symbols, ctx.channel.id))
+        task = asyncio.create_task(self.bot.on_ppo_cache(symbols, ctx.channel.id))
+        self.bot._background_tasks.add(task)
+        task.add_done_callback(self.bot._background_tasks.discard)
 
     @commands.command(name="ppotrain")
     async def ppotrain(self, ctx, *, tickers: str = None):
@@ -165,7 +167,9 @@ class TradingCommands(commands.Cog):
             color=0xFF6600,
         )
         await ctx.send(embed=embed)
-        asyncio.create_task(self.bot.on_ppo_train(symbols, ctx.channel.id))
+        task = asyncio.create_task(self.bot.on_ppo_train(symbols, ctx.channel.id))
+        self.bot._background_tasks.add(task)
+        task.add_done_callback(self.bot._background_tasks.discard)
 
     @commands.command(name="closeall")
     async def closeall(self, ctx):
@@ -371,6 +375,7 @@ class OpenClawDiscord(commands.Bot):
         self.on_backtest_stop = None  # set by main after startup
         self.on_ppo_cache = None      # set by main after startup
         self.on_ppo_train = None      # set by main after startup
+        self._background_tasks: set = set()  # strong refs to prevent GC
         self.screener = None          # set by main after startup
         self.settings = None          # set by main after startup
         
