@@ -92,7 +92,6 @@ class IBKRClient:
             )
             self.logger.info(f"SUCCESS: Connected to IBKR at {self.host}:{port}!")
             self.port = port
-            asyncio.ensure_future(self.ib.reqAccountUpdatesAsync())
         except Exception as exc:
             self.logger.error(f"Handshake failed on port {port}: {exc}")
             raise RuntimeError("Unable to connect to IBKR")
