@@ -92,7 +92,7 @@ class IBKRClient:
             )
             self.logger.info(f"SUCCESS: Connected to IBKR at {self.host}:{port}!")
             self.port = port
-            self.ib.reqAccountUpdates(True, "")
+            self.ib.reqAccountUpdates(True)
         except Exception as exc:
             self.logger.error(f"Handshake failed on port {port}: {exc}")
             raise RuntimeError("Unable to connect to IBKR")

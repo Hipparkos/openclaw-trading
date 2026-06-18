@@ -42,7 +42,7 @@ async def generate(tickers: list[str], duration: str) -> None:
             existing = json.load(f)
         logger.info("Loaded %d existing cache entries from %s", len(existing), CACHE_PATH)
 
-    client = IBKRClient()
+    client = IBKRClient({"connection": {"host": "ib_gateway", "clientId": 20}})
     await client.connect()
     engine = BacktestEngine(client=client)
 
