@@ -121,6 +121,52 @@ class TradingCommands(commands.Cog):
         )
         await ctx.send(embed=embed)
 
+    @commands.command(name="ppocache")
+    async def ppocache(self, ctx, *, tickers: str = None):
+        """Generate the LLM cache used for PPO training."""
+        if not tickers:
+            await ctx.send("Usage: `!ppocache NVDA AAPL MSFT` (space or comma separated)")
+            return
+        if not callable(getattr(self.bot, "on_ppo_cache", None)):
+            await ctx.send("PPO cache generator not available.")
+            return
+        symbols = [s.strip().upper() for s in tickers.replace(",", " ").split() if s.strip()]
+        embed = discord.Embed(
+            title="PPO CACHE GENERATION STARTED",
+            description=(
+                f"Tickers: **{', '.join(symbols)}**\n"
+                "Calling the LLM for each candidate bar — takes **10–60 min** depending on bar count.\n"
+                "You'll get a message here when it's done."
+            ),
+            color=0xFFAA00,
+        )
+        await ctx.send(embed=embed)
+        asyncio.create_task(self.bot.on_ppo_cache(symbols, ctx.channel.id))
+
+    @commands.command(name="ppotrain")
+    async def ppotrain(self, ctx, *, tickers: str = None):
+        """Generate LLM cache and train the PPO agent end-to-end."""
+        if not tickers:
+            await ctx.send("Usage: `!ppotrain NVDA AAPL MSFT` (space or comma separated)")
+            return
+        if not callable(getattr(self.bot, "on_ppo_train", None)):
+            await ctx.send("PPO trainer not available.")
+            return
+        symbols = [s.strip().upper() for s in tickers.replace(",", " ").split() if s.strip()]
+        embed = discord.Embed(
+            title="PPO TRAINING STARTED",
+            description=(
+                f"Tickers: **{', '.join(symbols)}**\n"
+                "**Step 1** — LLM cache generation\n"
+                "**Step 2** — Fetch historical bars from IBKR\n"
+                "**Step 3** — Train PPO agent (500k steps)\n\n"
+                "Total time: **1–3 hours**. You'll get a notification when done."
+            ),
+            color=0xFF6600,
+        )
+        await ctx.send(embed=embed)
+        asyncio.create_task(self.bot.on_ppo_train(symbols, ctx.channel.id))
+
     @commands.command(name="closeall")
     async def closeall(self, ctx):
         if not callable(getattr(self.bot, "on_manual_sell", None)):
@@ -323,6 +369,8 @@ class OpenClawDiscord(commands.Bot):
         self.on_add_ticker = None     # set by main after startup
         self.on_backtest_start = None # set by main after startup
         self.on_backtest_stop = None  # set by main after startup
+        self.on_ppo_cache = None      # set by main after startup
+        self.on_ppo_train = None      # set by main after startup
         self.screener = None          # set by main after startup
         self.settings = None          # set by main after startup
         

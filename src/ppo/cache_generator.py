@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from data.ibkr_client import IBKRClient
 from backtests.engine import BacktestEngine, _to_utc, _hourly_bars_up_to
 
-CACHE_PATH = Path("cache/llm_cache.json")
+CACHE_PATH = Path(__file__).parent.parent.parent / "cache" / "llm_cache.json"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -109,7 +109,7 @@ async def generate(tickers: list[str], duration: str) -> None:
         "Cache generation complete. Total entries: %d  (new this run: %d)",
         len(existing), new_entries,
     )
-    await client.disconnect()
+    client.disconnect()
 
 
 def _save(data: dict) -> None:

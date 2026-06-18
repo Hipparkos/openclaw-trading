@@ -19,6 +19,7 @@ import uvicorn
 import yaml
 from dotenv import load_dotenv
 
+import discord
 from backtests.engine import BacktestEngine
 from data.ibkr_client import IBKRClient
 from data.news_client import NewsClient
@@ -254,6 +255,99 @@ async def main() -> None:
 
     discord_ui.on_backtest_start = _run_backtest
     discord_ui.on_backtest_stop = _stop_backtest
+
+    # ── PPO callbacks ─────────────────────────────────────────────────────────
+    async def _run_ppo_cache(tickers: list[str], channel_id: int) -> None:
+        from ppo.cache_generator import generate as _ppo_generate
+        channel = discord_ui.get_channel(channel_id)
+        try:
+            await _ppo_generate(tickers, "3 M")
+            if channel:
+                embed = discord.Embed(
+                    title="PPO CACHE COMPLETE ✅",
+                    description=(
+                        f"LLM cache ready for: **{', '.join(tickers)}**\n"
+                        f"Run `!ppotrain {' '.join(tickers)}` to train the agent."
+                    ),
+                    color=0x00FF00,
+                )
+                await channel.send(embed=embed)
+        except Exception as exc:
+            logger.error("PPO cache generation failed: %s", exc, exc_info=True)
+            if channel:
+                await channel.send(f"PPO cache generation failed: `{exc}`")
+
+    async def _run_ppo_train(tickers: list[str], channel_id: int) -> None:
+        import json as _json
+        from ppo.cache_generator import generate as _ppo_generate
+        from ppo.train import precompute_ticker as _precompute
+        channel = discord_ui.get_channel(channel_id)
+
+        async def _status(msg: str) -> None:
+            if channel:
+                await channel.send(msg)
+
+        try:
+            await _status("PPO **Step 1/3** — generating LLM cache...")
+            await _ppo_generate(tickers, "3 M")
+
+            await _status("PPO **Step 2/3** — fetching historical bars from IBKR...")
+            train_client = IBKRClient({"connection": {"host": "ib_gateway", "clientId": 21}})
+            await train_client.connect()
+            train_engine = BacktestEngine(client=train_client)
+            all_bars: dict = {}
+            for sym in tickers:
+                all_bars[sym] = await train_engine._fetch_bars(sym, "3 M")
+                await asyncio.sleep(train_engine.IBKR_SYMBOL_PAUSE)
+            train_client.disconnect()
+
+            await _status("PPO **Step 3/3** — training agent (this runs in the background)...")
+            cache_path = Path("/app/cache/llm_cache.json")
+            with open(cache_path) as f:
+                llm_cache = _json.load(f)
+
+            def _do_train() -> None:
+                from ppo.environment import OpenClawEnv
+                from stable_baselines3 import PPO as _PPO
+                ticker_data = []
+                for sym in tickers:
+                    bars = all_bars.get(sym, {})
+                    td = _precompute(sym, bars.get("5 mins", []), bars.get("1 hour", []), train_engine, llm_cache)
+                    if td:
+                        ticker_data.append(td)
+                if not ticker_data:
+                    raise RuntimeError("No valid ticker data for training")
+                Path("/app/models").mkdir(parents=True, exist_ok=True)
+                env = OpenClawEnv(tickers=ticker_data)
+                model = _PPO(
+                    "MlpPolicy", env, verbose=0,
+                    n_steps=2048, batch_size=64, n_epochs=10,
+                    learning_rate=3e-4, gamma=0.99, gae_lambda=0.95,
+                    clip_range=0.2, ent_coef=0.01,
+                )
+                model.learn(total_timesteps=500_000)
+                model.save("/app/models/ppo_policy")
+
+            await asyncio.to_thread(_do_train)
+
+            if channel:
+                embed = discord.Embed(
+                    title="PPO TRAINING COMPLETE ✅",
+                    description=(
+                        "Policy saved to `models/ppo_policy.zip`.\n"
+                        "Run `!backteston` to see the improved results."
+                    ),
+                    color=0x00FF00,
+                )
+                await channel.send(embed=embed)
+
+        except Exception as exc:
+            logger.error("PPO training failed: %s", exc, exc_info=True)
+            if channel:
+                await channel.send(f"PPO training failed: `{exc}`")
+
+    discord_ui.on_ppo_cache = _run_ppo_cache
+    discord_ui.on_ppo_train = _run_ppo_train
 
     discord_token = os.getenv("DISCORD_TOKEN")
     shutdown_event = asyncio.Event()

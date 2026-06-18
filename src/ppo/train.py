@@ -29,8 +29,8 @@ from data.ibkr_client import IBKRClient
 from backtests.engine import BacktestEngine, _to_utc, _hourly_bars_up_to
 from ppo.environment import TickerData, build_static_obs
 
-CACHE_PATH = Path("cache/llm_cache.json")
-MODEL_PATH = Path("models/ppo_policy")
+CACHE_PATH = Path(__file__).parent.parent.parent / "cache" / "llm_cache.json"
+MODEL_PATH = Path(__file__).parent.parent.parent / "models" / "ppo_policy"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,7 +50,7 @@ async def _fetch_all(tickers: list[str], duration: str) -> tuple[dict, BacktestE
         logger.info("Fetching bars for %s...", symbol)
         all_bars[symbol] = await engine._fetch_bars(symbol, duration)
         await asyncio.sleep(engine.IBKR_SYMBOL_PAUSE)
-    await client.disconnect()
+    client.disconnect()
     return all_bars, engine
 
 
