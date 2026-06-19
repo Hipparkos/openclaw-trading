@@ -27,6 +27,7 @@ services:
       - ./data/logs:/app/data/logs
       - ./data/database:/app/data/database
       - ./config:/app/config
+      - ./models:/app/models
 
   ollama:
     image: ollama/ollama:latest
