@@ -343,7 +343,7 @@ class NewsClient:
             ],
             "stream": False,
             "options": {
-                "temperature": 0.4,
+                "temperature": 0.2,
             },
         }
 
