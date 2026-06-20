@@ -227,7 +227,7 @@ async def main() -> None:
     discord_ui.on_add_ticker = _subscribe_if_new
 
     # ── Backtest callbacks ────────────────────────────────────────────────────
-    backtest_engine = BacktestEngine(client, start_equity=100_000.0, ppo_policy_path="/app/models/ppo_policy.zip")
+    backtest_engine = BacktestEngine(client, start_equity=100_000.0)
 
     async def _run_backtest(channel_id: int) -> None:
         settings["backtest_mode"] = True
