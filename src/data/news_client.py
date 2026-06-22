@@ -474,12 +474,10 @@ class NewsClient:
 
         self.logger.info(f"Found {len(news_items)} total articles for {symbol} on Yahoo.")
 
-        timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=20)
+        # 180s total: up to 3 articles × 2 LLM calls each × ~25s per call on CPU
+        timeout = aiohttp.ClientTimeout(total=180, connect=10, sock_read=90)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            # Step 1: Prepare tasks to fetch predictions concurrently via asyncio.gather
-            tasks = []
             valid_items = []
-
             for item in news_items[:3]:
                 headline = self._first_nonempty_text(
                     item, ("title", "headline", "summary", "description", "content")
@@ -487,24 +485,23 @@ class NewsClient:
                 if not headline:
                     self.logger.warning("Skipping Yahoo news item without headline (id=%s)", item.get("id", "unknown"))
                     continue
-
                 valid_items.append((item, headline))
-                tasks.append(
-                    self.get_openclaw_prediction(
-                        session=session,
-                        ticker=symbol,
-                        technical_context=technical_context,
-                        headline=headline
-                    )
-                )
 
-            if not tasks:
+            if not valid_items:
                 return normalized_news
 
-            # Step 2: Fire all requests concurrently to avoid thread lockups
-            predictions = await asyncio.gather(*tasks)
+            # Sequential — CPU-only Ollama processes one request at a time anyway;
+            # concurrent gather just causes all but the first to time out while queued.
+            predictions = []
+            for item, headline in valid_items:
+                prediction = await self.get_openclaw_prediction(
+                    session=session,
+                    ticker=symbol,
+                    technical_context=technical_context,
+                    headline=headline,
+                )
+                predictions.append(prediction)
 
-            # Step 3: Process the results
             for (item, headline), prediction in zip(valid_items, predictions):
                 url = self._extract_url(item)
                 sentiment_score = self._prediction_to_score(prediction)
