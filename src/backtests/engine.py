@@ -417,93 +417,121 @@ class BacktestEngine:
             )
         return ctx
 
-    async def _llm_evaluate(
+    _LLM_SYSTEM_PROMPT = (
+        "You are an elite quantitative trading intelligence engine analyzing historical chart data. "
+        "No news context is available for this replay — evaluate based on technical indicators only.\n\n"
+        "### ANALYTICAL FRAMEWORK\n"
+        "Assess: trend (moving averages), momentum (RSI, MACD), mean-reversion (Bollinger Bands), "
+        "price vs VWAP, and market regime.\n"
+        "REGIME RULES:\n"
+        "  - RANGING (ADX<20): indicators are noisy — only trade extreme RSI or clear BB touches; "
+        "prefer NEUTRAL unless the setup is very clean.\n"
+        "  - DEVELOPING (ADX 20-25): emerging trend — require at least two confirming signals.\n"
+        "  - TRENDING (ADX≥25): follow the trend direction; momentum signals carry high weight.\n"
+        "VOLUME RULES: Low volume (<0.7× avg) weakens any signal — lower confidence or go NEUTRAL.\n"
+        "Rate conviction 0.5 to 1.0 when indicators clearly align. "
+        "Output NEUTRAL when indicators conflict or the setup is ambiguous.\n\n"
+        "### STRICT OUTPUT PROTOCOL\n"
+        "Output ONLY raw, unformatted JSON — no markdown, no explanation:\n"
+        "{\"direction\": \"BULLISH\" | \"BEARISH\" | \"NEUTRAL\", \"confidence\": <float>}"
+    )
+
+    def _parse_llm_raw(self, raw: str) -> tuple[str, float]:
+        if raw.startswith("```"):
+            raw = re.sub(
+                r"^```(?:json)?\s*|\s*```$", "", raw,
+                flags=re.IGNORECASE | re.DOTALL,
+            ).strip()
+        parsed = None
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+            if m:
+                try:
+                    parsed = json.loads(m.group(0))
+                except json.JSONDecodeError:
+                    pass
+        if isinstance(parsed, dict):
+            direction = str(parsed.get("direction", "NEUTRAL")).upper()
+            if direction not in ("BULLISH", "BEARISH", "NEUTRAL"):
+                direction = "NEUTRAL"
+            confidence = max(0.0, min(1.0, float(parsed.get("confidence", 0.0))))
+            return direction, confidence
+        dm = re.search(r"\b(BULLISH|BEARISH|NEUTRAL)\b", raw, re.IGNORECASE)
+        if dm:
+            return dm.group(1).upper(), 0.5
+        return "NEUTRAL", 0.0
+
+    async def _llm_call(
         self,
+        session: aiohttp.ClientSession,
         symbol: str,
         technical_context: str,
+        model: str,
     ) -> tuple[str, float]:
-        """
-        Async Ollama call via aiohttp — same library as the live system.
-        90-second timeout handles cold model loads.
-        Returns (direction, confidence).
-        """
-        system_prompt = (
-            "You are an elite quantitative trading intelligence engine analyzing historical chart data. "
-            "No news context is available for this replay — evaluate based on technical indicators only.\n\n"
-            "### ANALYTICAL FRAMEWORK\n"
-            "Assess: trend (moving averages), momentum (RSI, MACD), mean-reversion (Bollinger Bands), "
-            "price vs VWAP, and market regime.\n"
-            "REGIME RULES:\n"
-            "  - RANGING (ADX<20): indicators are noisy — only trade extreme RSI or clear BB touches; "
-            "prefer NEUTRAL unless the setup is very clean.\n"
-            "  - DEVELOPING (ADX 20-25): emerging trend — require at least two confirming signals.\n"
-            "  - TRENDING (ADX≥25): follow the trend direction; momentum signals carry high weight.\n"
-            "VOLUME RULES: Low volume (<0.7× avg) weakens any signal — lower confidence or go NEUTRAL.\n"
-            "Rate conviction 0.5 to 1.0 when indicators clearly align. "
-            "Output NEUTRAL when indicators conflict or the setup is ambiguous.\n\n"
-            "### STRICT OUTPUT PROTOCOL\n"
-            "Output ONLY raw, unformatted JSON — no markdown, no explanation:\n"
-            "{\"direction\": \"BULLISH\" | \"BEARISH\" | \"NEUTRAL\", \"confidence\": <float>}"
-        )
         user_prompt = (
             f"Ticker: {symbol}\n"
             f"Technical Setup: {technical_context}\n\n"
             "Return the JSON evaluation now."
         )
         payload = {
-            "model": "openclaw",
+            "model": model,
             "messages": [
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": self._LLM_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
             "stream": False,
             "options": {"temperature": 0.4},
         }
-        timeout = aiohttp.ClientTimeout(total=90, connect=10, sock_read=80)
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(
-                    f"{self.ollama_url}/api/chat",
-                    json=payload,
-                ) as resp:
-                    resp.raise_for_status()
-                    data = await resp.json(content_type=None)
-
+            async with session.post(f"{self.ollama_url}/api/chat", json=payload) as resp:
+                resp.raise_for_status()
+                data = await resp.json(content_type=None)
             raw = data.get("message", {}).get("content", "").strip()
-
-            # Same multi-layer parser as NewsClient._parse_openclaw_response
-            if raw.startswith("```"):
-                raw = re.sub(
-                    r"^```(?:json)?\s*|\s*```$", "", raw,
-                    flags=re.IGNORECASE | re.DOTALL,
-                ).strip()
-
-            parsed = None
-            try:
-                parsed = json.loads(raw)
-            except json.JSONDecodeError:
-                m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-                if m:
-                    try:
-                        parsed = json.loads(m.group(0))
-                    except json.JSONDecodeError:
-                        pass
-
-            if isinstance(parsed, dict):
-                direction = str(parsed.get("direction", "NEUTRAL")).upper()
-                if direction not in ("BULLISH", "BEARISH", "NEUTRAL"):
-                    direction = "NEUTRAL"
-                confidence = max(0.0, min(1.0, float(parsed.get("confidence", 0.0))))
-                return direction, confidence
-
-            dm = re.search(r"\b(BULLISH|BEARISH|NEUTRAL)\b", raw, re.IGNORECASE)
-            if dm:
-                return dm.group(1).upper(), 0.5
-
-            return "NEUTRAL", 0.0
+            return self._parse_llm_raw(raw)
         except Exception as exc:
-            self.logger.warning("LLM evaluate failed for %s: %s — treating as NEUTRAL", symbol, exc)
+            self.logger.warning("LLM call (%s) failed for %s: %s — NEUTRAL", model, symbol, exc)
             return "NEUTRAL", 0.0
+
+    async def _llm_evaluate(
+        self,
+        symbol: str,
+        technical_context: str,
+    ) -> tuple[str, float]:
+        """
+        Two-stage LLM evaluation:
+          1. openclaw (llama3.2) — primary assessment
+          2. qwen_reviewer (fine-tuned Qwen) — reviews primary and makes final call
+        Qwen is only invoked when openclaw returns a non-NEUTRAL signal,
+        keeping inference overhead low on quiet bars.
+        """
+        timeout = aiohttp.ClientTimeout(total=90, connect=10, sock_read=80)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            # ── Step 1: primary evaluator ──────────────────────────────────────
+            primary_dir, primary_conf = await self._llm_call(
+                session, symbol, technical_context, model="openclaw",
+            )
+            self.logger.debug(
+                "Primary (openclaw) %s → %s %.2f", symbol, primary_dir, primary_conf,
+            )
+
+            if primary_dir == "NEUTRAL":
+                return "NEUTRAL", 0.0
+
+            # ── Step 2: Qwen reviewer — final decision ─────────────────────────
+            review_ctx = (
+                f"{technical_context}\n\n"
+                f"Primary assessment: {primary_dir} at {primary_conf:.0%} confidence. "
+                "Review this setup independently and return your final evaluation."
+            )
+            final_dir, final_conf = await self._llm_call(
+                session, symbol, review_ctx, model="qwen_reviewer",
+            )
+            self.logger.debug(
+                "Reviewer (qwen) %s → %s %.2f", symbol, final_dir, final_conf,
+            )
+            return final_dir, final_conf
 
     # ── Symbol replay ──────────────────────────────────────────────────────────
 

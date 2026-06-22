@@ -352,18 +352,46 @@ class NewsClient:
                 response.raise_for_status()
                 data = await response.json(content_type=None)
 
-            # Updated parsing path matching standard Ollama /api/chat layout
             message_content = data.get("message", {}).get("content", "")
             raw_response = str(message_content).strip()
-
-            prediction = self._parse_openclaw_response(raw_response)
+            primary = self._parse_openclaw_response(raw_response)
             self.logger.info(
-                "OpenClaw prediction | ticker=%s | direction=%s | confidence=%.2f",
-                ticker,
-                prediction["direction"],
-                prediction["confidence"],
+                "Primary (openclaw) | ticker=%s | direction=%s | confidence=%.2f",
+                ticker, primary["direction"], primary["confidence"],
             )
-            return prediction
+
+            # ── Qwen reviewer: only called on non-NEUTRAL primary signals ──────
+            if primary["direction"] == "NEUTRAL":
+                return primary
+
+            review_user_prompt = (
+                f"Ticker: {ticker}\n"
+                f"Technical Setup: {technical_context or 'Not provided'}\n"
+                f"Headline Catalyst: {headline}\n"
+                f"Primary assessment: {primary['direction']} at {primary['confidence']:.0%} confidence.\n\n"
+                "Review this setup independently and return your final evaluation now."
+            )
+            review_payload = {
+                "model": "qwen_reviewer",
+                "messages": [
+                    {"role": "system", "content": payload["messages"][0]["content"]},
+                    {"role": "user",   "content": review_user_prompt},
+                ],
+                "stream": False,
+                "options": {"temperature": 0.2},
+            }
+            async with session.post(url, json=review_payload) as review_response:
+                review_response.raise_for_status()
+                review_data = await review_response.json(content_type=None)
+
+            review_raw = str(review_data.get("message", {}).get("content", "")).strip()
+            final = self._parse_openclaw_response(review_raw)
+            self.logger.info(
+                "Reviewer (qwen) | ticker=%s | direction=%s | confidence=%.2f",
+                ticker, final["direction"], final["confidence"],
+            )
+            return final
+
         except asyncio.TimeoutError:
             self.logger.error("Timed out waiting for OpenClaw prediction for %s.", ticker)
         except Exception as exc:
