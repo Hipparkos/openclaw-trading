@@ -408,7 +408,14 @@ class BacktestEngine:
             hourly_trend = self._strategy.evaluate_hourly_trend(df_1h)
         base = f"{hourly_trend} | 5m: {tech_5m}" if hourly_trend else tech_5m
         regime_ctx = self._strategy.evaluate_regime(cached_df)
-        return f"{base} | {regime_ctx}" if regime_ctx else base
+        ctx = f"{base} | {regime_ctx}" if regime_ctx else base
+        divergence = self._calc.calculate_divergence(cached_df)
+        if divergence["strength"] > 0.0:
+            ctx = (
+                f"{ctx} | Divergence: RSI={divergence['rsi_divergence']} "
+                f"MACD={divergence['macd_divergence']} strength={divergence['strength']:.2f}"
+            )
+        return ctx
 
     async def _llm_evaluate(
         self,

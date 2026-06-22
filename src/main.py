@@ -501,6 +501,13 @@ async def main() -> None:
                 if regime_ctx:
                     technical_context = f"{technical_context} | {regime_ctx}"
 
+                divergence = await asyncio.to_thread(indicator_calculator.calculate_divergence, df_5m)
+                if divergence["strength"] > 0.0:
+                    technical_context = (
+                        f"{technical_context} | Divergence: RSI={divergence['rsi_divergence']} "
+                        f"MACD={divergence['macd_divergence']} strength={divergence['strength']:.2f}"
+                    )
+
                 current_price = 0.0
                 latest_close = df_5m.iloc[-1].get("close")
                 if latest_close is not None and latest_close == latest_close:
