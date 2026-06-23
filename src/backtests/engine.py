@@ -202,14 +202,14 @@ def _hourly_bars_up_to(bars_1h: list[BarData], cutoff: datetime) -> list[BarData
 class BacktestEngine:
     # Mirror the live trading constants exactly
     WARMUP_BARS = 50
-    SIGNAL_THRESHOLD = 2      # out of 4 indicators — 2/4 required, Qwen filters weak signals
+    SIGNAL_THRESHOLD = 3      # out of 4 indicators — 3/4 required for quality entries
     STOP_LOSS_PCT = 0.02
     ATR_TRAIL_MULT = 2.0
     TAKE_PROFIT_ATR_MULT = 3.0
     POSITION_PCT = 0.015
     MIN_HOLD_BARS = 3         # 15 minutes before AI-reversal exit allowed
     COOLDOWN_BARS = 3         # 15-minute cooldown after close
-    LLM_COOLDOWN_BARS = 20    # ~1h40m between fresh LLM calls per symbol
+    LLM_COOLDOWN_BARS = 39    # ~3h15m between fresh LLM calls — 2 calls per session per symbol
     MAX_LOOKBACK_5M = 200     # rolling window for indicator computation
     IBKR_TIMEFRAME_PAUSE = 5.0   # seconds between bar-size requests for same symbol
     IBKR_SYMBOL_PAUSE = 12.0     # seconds between symbols — avoids pacing with live subs
@@ -711,10 +711,10 @@ class BacktestEngine:
                     sig, conf = sig_det, conf_det
 
                 if llm_sig != "NEUTRAL":
-                    if conf < 0.60:
+                    if conf < 0.65:
                         continue
                 else:
-                    if conf < 0.55:
+                    if conf < 0.60:
                         continue
 
                 qty = max(1, int((equity * self.POSITION_PCT * conf) / fill_price))
