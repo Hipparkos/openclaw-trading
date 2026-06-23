@@ -29,6 +29,7 @@ import re
 import aiohttp
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 
 import numpy as np
@@ -201,14 +202,14 @@ def _hourly_bars_up_to(bars_1h: list[BarData], cutoff: datetime) -> list[BarData
 class BacktestEngine:
     # Mirror the live trading constants exactly
     WARMUP_BARS = 50
-    SIGNAL_THRESHOLD = 3      # out of 4 indicators — 3/4 required for higher win rate
+    SIGNAL_THRESHOLD = 2      # out of 4 indicators — 2/4 required, Qwen filters weak signals
     STOP_LOSS_PCT = 0.02
     ATR_TRAIL_MULT = 2.0
     TAKE_PROFIT_ATR_MULT = 3.0
     POSITION_PCT = 0.015
     MIN_HOLD_BARS = 3         # 15 minutes before AI-reversal exit allowed
     COOLDOWN_BARS = 3         # 15-minute cooldown after close
-    LLM_COOLDOWN_BARS = 78    # one full trading session between fresh LLM calls per symbol
+    LLM_COOLDOWN_BARS = 20    # ~1h40m between fresh LLM calls per symbol
     MAX_LOOKBACK_5M = 200     # rolling window for indicator computation
     IBKR_TIMEFRAME_PAUSE = 5.0   # seconds between bar-size requests for same symbol
     IBKR_SYMBOL_PAUSE = 12.0     # seconds between symbols — avoids pacing with live subs
@@ -678,6 +679,12 @@ class BacktestEngine:
             if not in_position:
                 # Cooldown gate
                 if last_exit_bar >= 0 and (i - last_exit_bar) < self.COOLDOWN_BARS:
+                    continue
+
+                # Opening 30-minute noise filter (9:30–10:00 ET)
+                # IBKR RTH data starts at 9:30, so hour==9 covers the full noisy opening window
+                bar_et = current_time.astimezone(ZoneInfo("America/New_York"))
+                if bar_et.hour == 9:
                     continue
 
                 # Pre-filter: fast indicator vote — avoids LLM call on bars with no activity
