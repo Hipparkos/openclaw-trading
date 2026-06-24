@@ -323,7 +323,7 @@ class OpenClawDiscord(commands.Bot):
         self.on_add_ticker = None     # set by main after startup
         self.on_backtest_start = None # set by main after startup
         self.on_backtest_stop = None  # set by main after startup
-self._background_tasks: set = set()  # strong refs to prevent GC
+        self._background_tasks: set = set()  # strong refs to prevent GC
         self.screener = None          # set by main after startup
         self.settings = None          # set by main after startup
         
