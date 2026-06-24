@@ -204,10 +204,10 @@ class BacktestEngine:
     WARMUP_BARS = 50
     SIGNAL_THRESHOLD = 3      # out of 4 indicators — 3/4 required for quality entries
     STOP_LOSS_PCT = 0.02
-    ATR_TRAIL_MULT = 2.0
+    ATR_TRAIL_MULT = 2.5
     TAKE_PROFIT_ATR_MULT = 3.0
     POSITION_PCT = 0.015
-    MIN_HOLD_BARS = 3         # 15 minutes before AI-reversal exit allowed
+    MIN_HOLD_BARS = 5         # 25 minutes before AI-reversal exit allowed
     COOLDOWN_BARS = 3         # 15-minute cooldown after close
     LLM_COOLDOWN_BARS = 20    # ~1h40m between fresh LLM calls per symbol
     MAX_LOOKBACK_5M = 200     # rolling window for indicator computation
