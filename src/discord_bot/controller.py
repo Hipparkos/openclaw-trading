@@ -375,6 +375,30 @@ class TradingCommands(commands.Cog):
             await status_msg.edit(embed=embed)
 
 
+    @commands.command(name="halt")
+    async def halt(self, ctx) -> None:
+        """Manually activate the circuit breaker — block all new entries."""
+        if self.bot.circuit_breaker is not None:
+            self.bot.circuit_breaker["halted"] = True
+        embed = discord.Embed(
+            title="TRADING HALTED",
+            description="Circuit breaker manually activated. No new entries will be placed.\nUse `!resume` to re-enable.",
+            color=0xFF0000,
+        )
+        await ctx.send(embed=embed)
+
+    @commands.command(name="resume")
+    async def resume(self, ctx) -> None:
+        """Clear the circuit breaker and allow new entries again."""
+        if self.bot.circuit_breaker is not None:
+            self.bot.circuit_breaker["halted"] = False
+        embed = discord.Embed(
+            title="TRADING RESUMED",
+            description="Circuit breaker cleared. Bot will enter new positions normally.",
+            color=0x00FF00,
+        )
+        await ctx.send(embed=embed)
+
     @commands.command(name="stats")
     async def stats(self, ctx) -> None:
         """Show YTD/MTD/1-week performance chart with interactive period buttons."""
@@ -401,6 +425,7 @@ class OpenClawDiscord(commands.Bot):
         self._background_tasks: set = set()  # strong refs to prevent GC
         self.screener = None          # set by main after startup
         self.settings = None          # set by main after startup
+        self.circuit_breaker = None   # set by main after startup
         
         try:
             self.channel_id = int(os.getenv("DISCORD_CHANNEL_ID", 0))
@@ -427,6 +452,32 @@ class OpenClawDiscord(commands.Bot):
         except Exception as exc:
             logging.error("Unable to resolve Discord channel %s: %s", self.channel_id, exc)
             return None
+
+    async def send_circuit_breaker_alert(
+        self,
+        daily_loss: float,
+        trade_count: int,
+        equity: float,
+        limit_pct: float,
+    ) -> None:
+        channel = await self._get_target_channel()
+        if channel is None:
+            return
+        loss_sign = "" if daily_loss >= 0 else "-"
+        embed = discord.Embed(
+            title="CIRCUIT BREAKER — TRADING HALTED",
+            description=(
+                f"Daily loss limit of **{limit_pct * 100:.1f}%** reached.\n"
+                f"All new entries are **blocked** until tomorrow's market open.\n"
+                f"Use `!resume` to override manually."
+            ),
+            color=0xFF0000,
+        )
+        embed.add_field(name="Daily Loss",    value=f"`-${abs(daily_loss):,.2f}`", inline=True)
+        embed.add_field(name="Trades Today",  value=f"`{trade_count}`",            inline=True)
+        embed.add_field(name="Account Equity",value=f"`${equity:,.2f}`",           inline=True)
+        embed.set_footer(text=f"Limit: {limit_pct * 100:.1f}% × ${equity:,.0f} = ${limit_pct * equity:,.2f}")
+        await channel.send(embed=embed)
 
     async def send_trade_signal(self, symbol, market_story, llm_prediction):
         if not self.channel_id:
@@ -711,13 +762,11 @@ class OpenClawDiscord(commands.Bot):
         exp_icon = "✅" if result.expectancy > 0 else "❌"
         pf_str = f"`{result.profit_factor:.2f}`" if result.profit_factor != float("inf") else "`∞`"
 
-        embed.add_field(name="Total Trades", value=f"`{result.total_trades}`", inline=True)
-        embed.add_field(
-            name=f"Win Rate {wr_icon}",
-            value=f"`{result.win_rate * 100:.1f}%`",
-            inline=True,
-        )
-        embed.add_field(name="​", value="​", inline=True)
+        halted = getattr(result, "halted_days", 0)
+        halted_str = f"`{halted} days`" if halted else "`none`"
+        embed.add_field(name="Total Trades",   value=f"`{result.total_trades}`",          inline=True)
+        embed.add_field(name=f"Win Rate {wr_icon}", value=f"`{result.win_rate * 100:.1f}%`", inline=True)
+        embed.add_field(name="Circuit Breaks", value=halted_str,                           inline=True)
 
         embed.add_field(
             name="Avg Win",

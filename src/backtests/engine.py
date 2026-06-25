@@ -72,6 +72,7 @@ class BacktestResult:
     bars_fetched: dict = field(default_factory=dict)   # {symbol: int}  5m bars per ticker
     bars_replayed: dict = field(default_factory=dict)  # {symbol: int}  bars that reached signal eval
     signals_fired: dict = field(default_factory=dict)  # {symbol: int}  entries attempted
+    halted_days: int = 0                               # trading days the circuit breaker fired
 
     # Computed by finalise()
     total_return: float = 0.0
@@ -204,6 +205,7 @@ class BacktestEngine:
     WARMUP_BARS = 50
     SIGNAL_THRESHOLD = 3      # out of 4 indicators — 3/4 required for quality entries
     STOP_LOSS_PCT = 0.02
+    DAILY_LOSS_LIMIT_PCT = 0.005  # halt new entries when day's P&L < -0.5% of equity
     ATR_TRAIL_MULT = 2.5
     TAKE_PROFIT_ATR_MULT = 3.0
     POSITION_PCT = 0.015
@@ -542,6 +544,7 @@ class BacktestEngine:
         bars_5m: list[BarData],
         bars_1h: list[BarData],
         starting_equity: float,
+        daily_global_pnl: dict[str, float] | None = None,
     ) -> tuple[list[TradeRecord], float, int]:
         """
         Sequential bar-by-bar replay.  Fill price is always bar[i+1].open so
@@ -659,6 +662,9 @@ class BacktestEngine:
                         pnl_pct = (entry_price - exit_price) / entry_price
 
                     equity += pnl
+                    if daily_global_pnl is not None:
+                        day_key = current_time.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+                        daily_global_pnl[day_key] = daily_global_pnl.get(day_key, 0.0) + pnl
                     trades.append(TradeRecord(
                         symbol=symbol,
                         direction=direction,
@@ -687,6 +693,13 @@ class BacktestEngine:
                 bar_et = current_time.astimezone(ZoneInfo("America/New_York"))
                 if bar_et.hour == 9:
                     continue
+
+                # Daily drawdown circuit breaker — halt new entries once the shared
+                # account-level daily P&L crosses -DAILY_LOSS_LIMIT_PCT of equity
+                if daily_global_pnl is not None:
+                    today_str = bar_et.strftime("%Y-%m-%d")
+                    if daily_global_pnl.get(today_str, 0.0) < -(self.DAILY_LOSS_LIMIT_PCT * starting_equity):
+                        continue
 
                 # Pre-filter: fast indicator vote — avoids LLM call on bars with no activity
                 sig_det, conf_det = self._compute_signal(window_5m, window_1h, cached_df=cached_df, cached_df_1h=df_1h_slice)
@@ -786,6 +799,9 @@ class BacktestEngine:
         equity = start_eq
         all_trades: list[TradeRecord] = []
         fetched_any = False
+        # Shared daily P&L across all symbols — lets the circuit breaker operate
+        # at the account level rather than per-symbol
+        daily_global_pnl: dict[str, float] = {}
 
         for symbol in tickers:
             self.logger.info("Fetching historical bars for %s...", symbol)
@@ -815,7 +831,8 @@ class BacktestEngine:
 
             self.logger.info("Replaying %s — %d bars (LLM active)", symbol, n5)
             sym_trades, equity, sig_count = await self._replay_symbol(
-                symbol, bars_5m, bars_1h, equity
+                symbol, bars_5m, bars_1h, equity,
+                daily_global_pnl=daily_global_pnl,
             )
             result.bars_replayed[symbol] = n5
             result.signals_fired[symbol] = sig_count
@@ -833,6 +850,10 @@ class BacktestEngine:
         if not fetched_any:
             self.logger.error("No data fetched for any ticker. Backtest aborted.")
             return result
+
+        # Count days where the circuit breaker was active
+        limit = self.DAILY_LOSS_LIMIT_PCT * start_eq
+        result.halted_days = sum(1 for pnl in daily_global_pnl.values() if pnl < -limit)
 
         # Sort chronologically and compute all metrics
         all_trades.sort(key=lambda t: t.entry_time)

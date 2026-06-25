@@ -271,6 +271,9 @@ async def main() -> None:
 
     # Day-scoped state — reset each trading day
     daily_closed_trades: List[Dict[str, Any]] = []
+    # Mutable dict so nested functions can mutate without nonlocal
+    circuit_breaker = {"halted": False}
+    DAILY_LOSS_LIMIT_PCT = 0.005  # halt new entries when day P&L < -0.5% equity
     eod_recap_sent_date: Optional[date] = None
     eod_liquidation_done_date: Optional[date] = None
 
@@ -312,6 +315,23 @@ async def main() -> None:
                     exit_price=exit_price,
                     quantity=quantity,
                 )
+            # Check circuit breaker after recording the trade
+            if not circuit_breaker["halted"]:
+                daily_net = sum(t["pnl"] for t in daily_closed_trades)
+                account_eq = order_manager.get_account_equity()
+                if account_eq > 0 and daily_net < -(DAILY_LOSS_LIMIT_PCT * account_eq):
+                    circuit_breaker["halted"] = True
+                    logger.warning(
+                        "CIRCUIT BREAKER FIRED — daily loss %.2f exceeds %.1f%% limit. "
+                        "New entries blocked for the rest of the session.",
+                        daily_net, DAILY_LOSS_LIMIT_PCT * 100,
+                    )
+                    asyncio.create_task(discord_ui.send_circuit_breaker_alert(
+                        daily_loss=daily_net,
+                        trade_count=len(daily_closed_trades),
+                        equity=account_eq,
+                        limit_pct=DAILY_LOSS_LIMIT_PCT,
+                    ))
 
     def _get_last_price(symbol: str) -> float:
         bars = list(client.data_buffer.get(symbol, {}).get("5 mins", []))
@@ -376,6 +396,7 @@ async def main() -> None:
         return results
 
     discord_ui.on_manual_sell = liquidate_all_positions
+    discord_ui.circuit_breaker = circuit_breaker
 
     try:
         logger.info("Starting...")
@@ -485,6 +506,10 @@ async def main() -> None:
                 is_holding = holding_quantity != 0.0
 
                 if signal_direction == "BULLISH" and not is_holding:
+                    if circuit_breaker["halted"]:
+                        logger.info("Circuit breaker active — skipping BUY for %s.", symbol)
+                        return
+
                     last_buy = last_buy_time.get(symbol_key)
                     last_sell = last_sell_time.get(symbol_key)
 
@@ -641,6 +666,7 @@ async def main() -> None:
                 # Reset daily stats at the start of each new trading day
                 if eod_recap_sent_date is not None and eod_recap_sent_date != today_et:
                     daily_closed_trades.clear()
+                    circuit_breaker["halted"] = False
 
                 # End of Day recap — sent once in the 10-minute window after close
                 if _is_just_after_close() and eod_recap_sent_date != today_et:
