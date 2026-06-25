@@ -1,10 +1,13 @@
 import asyncio
 import os
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 import discord
 from discord.ext import commands
+
+from data.trade_db import TradeHistoryDB
+from discord_bot.stats_chart import generate_stats_chart
 
 class TradeApprovalView(discord.ui.View):
     def __init__(self, order_manager, symbol, side):
@@ -31,6 +34,65 @@ class TradeApprovalView(discord.ui.View):
             child.disabled = True
         await interaction.response.edit_message(view=self)
         await interaction.followup.send("Signal rejected. Order cancelled.")
+
+
+class StatsView(discord.ui.View):
+    PERIODS = {
+        "YTD":    lambda now: now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0),
+        "MTD":    lambda now: now.replace(day=1,           hour=0, minute=0, second=0, microsecond=0),
+        "1 Week": lambda now: now - timedelta(days=7),
+    }
+
+    def __init__(self) -> None:
+        super().__init__(timeout=300)
+        self._db = TradeHistoryDB()
+        self._current = "YTD"
+
+    def _build(self, period: str) -> tuple[discord.Embed, discord.File]:
+        now = datetime.now(timezone.utc)
+        since = self.PERIODS[period](now)
+        trades = self._db.get_trades(since=since)
+
+        span = {
+            "YTD":    now.strftime("%Y"),
+            "MTD":    now.strftime("%B %Y"),
+            "1 Week": f"{since.strftime('%b %d')} – {now.strftime('%b %d, %Y')}",
+        }
+        label = f"Performance {period}  ({span[period]})"
+        buf = generate_stats_chart(trades, label)
+
+        file  = discord.File(buf, filename="stats.png")
+        embed = discord.Embed(color=0x00D4B8)
+        embed.set_image(url="attachment://stats.png")
+        embed.set_footer(text=f"Updated {now.strftime('%Y-%m-%d %H:%M')} UTC  •  {len(trades)} trades")
+        return embed, file
+
+    def _refresh_styles(self, active: str) -> None:
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.style = (
+                    discord.ButtonStyle.primary
+                    if child.label == active
+                    else discord.ButtonStyle.secondary
+                )
+
+    async def _switch(self, interaction: discord.Interaction, period: str) -> None:
+        self._current = period
+        self._refresh_styles(period)
+        embed, file = await asyncio.to_thread(self._build, period)
+        await interaction.response.edit_message(embed=embed, attachments=[file], view=self)
+
+    @discord.ui.button(label="YTD",    style=discord.ButtonStyle.primary)
+    async def btn_ytd(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._switch(interaction, "YTD")
+
+    @discord.ui.button(label="MTD",    style=discord.ButtonStyle.secondary)
+    async def btn_mtd(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._switch(interaction, "MTD")
+
+    @discord.ui.button(label="1 Week", style=discord.ButtonStyle.secondary)
+    async def btn_1w(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._switch(interaction, "1 Week")
 
 
 class TradingCommands(commands.Cog):
@@ -311,6 +373,19 @@ class TradingCommands(commands.Cog):
                 color=0x992D22,
             )
             await status_msg.edit(embed=embed)
+
+
+    @commands.command(name="stats")
+    async def stats(self, ctx) -> None:
+        """Show YTD/MTD/1-week performance chart with interactive period buttons."""
+        view = StatsView()
+        try:
+            embed, file = await asyncio.to_thread(view._build, "YTD")
+        except Exception as exc:
+            logging.error("!stats chart generation failed: %s", exc)
+            await ctx.send("Failed to generate stats chart. Check the logs.")
+            return
+        await ctx.send(embed=embed, file=file, view=view)
 
 
 class OpenClawDiscord(commands.Bot):

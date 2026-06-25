@@ -23,6 +23,7 @@ import discord
 from backtests.engine import BacktestEngine
 from data.ibkr_client import IBKRClient
 from data.news_client import NewsClient
+from data.trade_db import TradeHistoryDB
 from discord_bot.controller import OpenClawDiscord
 from strategy.indicators import IndicatorCalculator
 from strategy.logic import StrategyEngine
@@ -265,6 +266,9 @@ async def main() -> None:
     last_sell_time: Dict[str, datetime] = {}
     open_trade_memory: Dict[str, Dict[str, Any]] = {}
 
+    # Persistent trade history (survives restarts, used for YTD/MTD/1W stats)
+    trade_history_db = TradeHistoryDB()
+
     # Day-scoped state — reset each trading day
     daily_closed_trades: List[Dict[str, Any]] = []
     eod_recap_sent_date: Optional[date] = None
@@ -285,13 +289,29 @@ async def main() -> None:
         signal.signal(signal.SIGINT, lambda sig, frame: loop.call_soon_threadsafe(graceful_shutdown))
         signal.signal(signal.SIGTERM, lambda sig, frame: loop.call_soon_threadsafe(graceful_shutdown))
 
-    def _record_closed_trade(entry_price: float, exit_price: float, quantity: float, confidence: float) -> None:
+    def _record_closed_trade(
+        entry_price: float,
+        exit_price: float,
+        quantity: float,
+        confidence: float,
+        *,
+        symbol: str = "",
+        entry_time: datetime | None = None,
+    ) -> None:
         if entry_price > 0.0 and exit_price > 0.0:
             pnl = (exit_price - entry_price) * quantity
-            daily_closed_trades.append({
-                "pnl": pnl,
-                "confidence": confidence,
-            })
+            daily_closed_trades.append({"pnl": pnl, "confidence": confidence})
+            if symbol:
+                trade_history_db.record(
+                    symbol=symbol,
+                    pnl=pnl,
+                    confidence=confidence,
+                    entry_time=entry_time,
+                    exit_time=datetime.now(timezone.utc),
+                    entry_price=entry_price,
+                    exit_price=exit_price,
+                    quantity=quantity,
+                )
 
     def _get_last_price(symbol: str) -> float:
         bars = list(client.data_buffer.get(symbol, {}).get("5 mins", []))
@@ -322,7 +342,8 @@ async def main() -> None:
                 entry_time_mem = trade_memory.get("entry_time")
                 exit_price = _get_last_price(symbol) or entry_price
                 confidence = float(trade_memory.get("entry_confidence", 0.0))
-                _record_closed_trade(entry_price, exit_price, close_qty, confidence)
+                _record_closed_trade(entry_price, exit_price, close_qty, confidence,
+                                     symbol=symbol, entry_time=entry_time_mem)
 
                 if is_long:
                     outcome_pct = ((exit_price - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
@@ -538,7 +559,8 @@ async def main() -> None:
                             entry_time_mem = stopped_trade_memory.get("entry_time") if stopped_trade_memory else None
                             if stopped_trade_memory:
                                 entry_conf = float(stopped_trade_memory.get("entry_confidence", 0.0))
-                                _record_closed_trade(entry_price, current_price, sell_quantity, entry_conf)
+                                _record_closed_trade(entry_price, current_price, sell_quantity, entry_conf,
+                                                     symbol=symbol, entry_time=entry_time_mem)
                                 outcome = _trade_outcome(entry_price, current_price)
                                 await news_client.record_trade_memory_async(
                                     symbol=symbol,
@@ -578,7 +600,8 @@ async def main() -> None:
                         entry_price_mem = float(trade_memory.get("entry_price", 0.0))
                         entry_time_mem = trade_memory.get("entry_time")
                         entry_conf = float(trade_memory.get("entry_confidence", 0.0))
-                        _record_closed_trade(entry_price_mem, current_price, sell_quantity, entry_conf)
+                        _record_closed_trade(entry_price_mem, current_price, sell_quantity, entry_conf,
+                                             symbol=symbol, entry_time=entry_time_mem)
                         outcome = _trade_outcome(entry_price_mem, current_price)
                         await news_client.record_trade_memory_async(
                             symbol=symbol,
@@ -677,7 +700,8 @@ async def main() -> None:
                                 stopped_trade_memory = open_trade_memory.pop(symbol_key, None)
                                 entry_time_mem = stopped_trade_memory.get("entry_time") if stopped_trade_memory else None
                                 if stopped_trade_memory:
-                                    _record_closed_trade(entry_price, current_price, sell_quantity, entry_conf)
+                                    _record_closed_trade(entry_price, current_price, sell_quantity, entry_conf,
+                                                         symbol=symbol, entry_time=entry_time_mem)
                                     outcome = _trade_outcome(entry_price, current_price)
                                     await news_client.record_trade_memory_async(
                                         symbol=symbol,
@@ -711,7 +735,8 @@ async def main() -> None:
                                 stopped_trade_memory = open_trade_memory.pop(symbol_key, None)
                                 entry_time_mem = stopped_trade_memory.get("entry_time") if stopped_trade_memory else None
                                 if stopped_trade_memory:
-                                    _record_closed_trade(entry_price, current_price, sell_quantity, entry_conf)
+                                    _record_closed_trade(entry_price, current_price, sell_quantity, entry_conf,
+                                                         symbol=symbol, entry_time=entry_time_mem)
                                     outcome = _trade_outcome(entry_price, current_price)
                                     await news_client.record_trade_memory_async(
                                         symbol=symbol,

@@ -618,17 +618,18 @@ class BacktestEngine:
                 if loss_pct >= self.STOP_LOSS_PCT:
                     exit_reason = "2% stop-loss"
 
-                # 2. ATR trailing stop
-                if exit_reason is None and current_atr > 0:
+                # 2. ATR trailing stop (anchored to initial_atr so the stop distance
+                #    doesn't widen during high-volatility moves mid-trade)
+                if exit_reason is None and initial_atr > 0:
                     if direction == "LONG":
                         if current_price > peak_price:
                             peak_price = current_price
-                        if current_price <= peak_price - self.ATR_TRAIL_MULT * current_atr:
+                        if current_price <= peak_price - self.ATR_TRAIL_MULT * initial_atr:
                             exit_reason = "ATR trailing stop"
                     else:
                         if current_price < peak_price:
                             peak_price = current_price
-                        if current_price >= peak_price + self.ATR_TRAIL_MULT * current_atr:
+                        if current_price >= peak_price + self.ATR_TRAIL_MULT * initial_atr:
                             exit_reason = "ATR trailing stop"
 
                 # 3. Take-profit (3× ATR from entry)
