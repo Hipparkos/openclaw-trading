@@ -58,7 +58,7 @@ class IBKRClient:
     def _on_disconnected(self) -> None:
         self.logger.warning("IBKR connection lost.")
         if not self._is_reconnecting:
-            self.logger.info("Starting reconnection loop...")
+            self.logger.info("Reconnecting to IBKR...")
             self._is_reconnecting = True
             asyncio.create_task(self._reconnect_loop())
 
@@ -67,22 +67,22 @@ class IBKRClient:
         while not self.ib.isConnected():
             try:
                 await asyncio.sleep(self.retry_delay)
-                self.logger.info("Attempting to reconnect...")
+                self.logger.info("Retrying IBKR connection...")
                 await self.connect()
                 if self.ib.isConnected():
-                    self.logger.info("Runtime recovery successful.")
+                    self.logger.info("Reconnected to IBKR.")
                     self._is_reconnecting = False  # Reset flag
                     await self.stream_market_data()
                     break
             except Exception as e:
-                self.logger.error(f"Runtime reconnection failed: {e}")
+                self.logger.error(f"Reconnect attempt failed: {e}")
 
     # Connect async - reliable connect with retries
     async def connect(self) -> None:
         port = 4004
 
         try:
-            self.logger.info(f"Attempting API handshake at {self.host}:{port} with Client ID {self.client_id}...")
+            self.logger.info(f"Connecting to IBKR at {self.host}:{port} (client {self.client_id})...")
 
             await self.ib.connectAsync(
                 self.host,
@@ -90,10 +90,10 @@ class IBKRClient:
                 clientId=self.client_id,
                 timeout=15,
             )
-            self.logger.info(f"SUCCESS: Connected to IBKR at {self.host}:{port}!")
+            self.logger.info(f"Connected to IBKR at {self.host}:{port}.")
             self.port = port
         except Exception as exc:
-            self.logger.error(f"Handshake failed on port {port}: {exc}")
+            self.logger.error(f"Connection to IBKR failed on port {port}: {exc}")
             raise RuntimeError("Unable to connect to IBKR")
 
     # Bar update handler - log incoming bars
@@ -116,9 +116,9 @@ class IBKRClient:
             self.data_buffer.setdefault(symbol, {}).setdefault(bar_size, []).append(normalized_bar)
             
             self.logger.info(
-                "%s [%s] | O: %s | H: %s | L: %s | C: %s | V: %s", 
-                symbol, 
-                bar_size, 
+                "%s [%s] bar | O %s H %s L %s C %s V %s",
+                symbol,
+                bar_size,
                 normalized_bar.open, 
                 normalized_bar.high, 
                 normalized_bar.low, 
@@ -138,7 +138,7 @@ class IBKRClient:
 
                         strategy_engine = StrategyEngine()
                         signal = strategy_engine.evaluate_signals(df)
-                        self.logger.info("Strategy signal: %s", signal)
+                        self.logger.info("%s strategy snapshot: %s", symbol, signal)
                     except Exception:
                         self.logger.exception("Strategy evaluation failed for %s", symbol)
 
@@ -185,7 +185,7 @@ class IBKRClient:
         except Exception:
             fetched_count = len(buffered_bars)
         self.logger.info(
-            "Confirmed fetch: %s fetched %d bars for timeframe=%s",
+            "%s: loaded %d %s bars from IBKR.",
             symbol,
             fetched_count,
             bar_size,
@@ -209,21 +209,21 @@ class IBKRClient:
         latest_bar = bars[-1] if bars else None
         if latest_bar is not None:
             self.logger.info(
-                "Fetched %s %s bar with open=%s close=%s",
+                "%s %s latest bar: open=%s close=%s",
                 symbol,
                 bar_size,
                 latest_bar.open,
                 latest_bar.close,
             )
         else:
-            self.logger.info("Fetched %s %s bar", symbol, bar_size)
+            self.logger.info("%s %s: no bars returned.", symbol, bar_size)
 
     # Stream market data - start streams concurrently
     async def stream_market_data(self) -> None:
         if not self.ib.isConnected():
             await self.connect()
 
-        self.logger.info("Initializing concurrent market data streams...")
+        self.logger.info("Starting market data streams...")
         semaphore = asyncio.Semaphore(3) 
 
         async def _bounded_subscribe(symbol: str):
@@ -239,4 +239,4 @@ class IBKRClient:
         self.ib.disconnectedEvent -= self._on_disconnected
         if self.ib.isConnected():
             self.ib.disconnect()
-            self.logger.info("Disconnected from IBKR cleanly.")
+            self.logger.info("Disconnected from IBKR.")

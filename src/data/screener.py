@@ -19,21 +19,21 @@ class VolumeGainerScreener:
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
 
     async def screen_volume_gainers(self) -> List[str]:
-        self.logger.info("Starting volume gainer screener...")
+        self.logger.info("Running stock screener...")
 
         # Only screen during market hours (avoid API errors when market is closed)
         if not self._is_market_open():
-            self.logger.info("Market is currently closed. Skipping live screener.")
+            self.logger.info("Market closed — skipping screener.")
             return []
 
         try:
             symbols = await asyncio.to_thread(self._fetch_most_active)
             if not symbols:
-                self.logger.warning("Yahoo Finance API returned no symbols.")
+                self.logger.warning("Yahoo screener returned no symbols.")
                 return []
-            self.logger.info(f"Found {len(symbols)} most active stocks: {symbols}")
+            self.logger.info(f"Yahoo most-active list ({len(symbols)}): {symbols}")
         except Exception as e:
-            self.logger.error(f"Failed to fetch most active stocks: {type(e).__name__}: {e}", exc_info=True)
+            self.logger.error(f"Could not fetch most-active stocks: {type(e).__name__}: {e}", exc_info=True)
             return []
 
         # Validate: price range, volume, liquidity
@@ -44,7 +44,7 @@ class VolumeGainerScreener:
                 if len(validated) >= 10:
                     break
 
-        self.logger.info(f"Validated {len(validated)} stocks for day trading: {validated}")
+        self.logger.info(f"Selected {len(validated)} tradable tickers: {validated}")
 
         cache_data = {
             "date": datetime.now().isoformat(),
@@ -110,8 +110,8 @@ class VolumeGainerScreener:
                 return False
 
             self.logger.info(
-                f"✓ {symbol} | Price ${price:.2f} | Volume {volume:,} | "
-                f"Float {float_shares:,} | MCap ${market_cap:,.0f}"
+                f"{symbol} passed screen | price ${price:.2f} | vol {volume:,.0f} | "
+                f"float {float_shares:,.0f} | mcap ${market_cap:,.0f}"
             )
             return True
 
@@ -146,11 +146,11 @@ class VolumeGainerScreener:
 
                 if cache_date == today:
                     symbols = data.get("symbols", [])
-                    self.logger.info(f"Loaded cached symbols (date={cache_date}): {symbols}")
+                    self.logger.info(f"Using cached screen from {cache_date}: {symbols}")
                     return symbols
                 else:
-                    self.logger.info(f"Cache stale (date={cache_date}, today={today}), re-screening...")
+                    self.logger.info(f"Screen cache is stale ({cache_date}) — re-screening for {today}.")
             except Exception as e:
-                self.logger.warning(f"Could not load cache: {e}")
+                self.logger.warning(f"Could not load screen cache: {e}")
 
         return await self.screen_volume_gainers()

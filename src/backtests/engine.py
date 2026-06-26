@@ -272,7 +272,7 @@ class BacktestEngine:
                     for bar in bars
                 ]
                 self.logger.info(
-                    "Backtest fetch: %s [%s] → %d bars",
+                    "%s [%s]: fetched %d bars.",
                     symbol, bar_size, len(result[bar_size]),
                 )
             except Exception as exc:
@@ -494,7 +494,7 @@ class BacktestEngine:
             raw = data.get("message", {}).get("content", "").strip()
             return self._parse_llm_raw(raw)
         except Exception as exc:
-            self.logger.warning("LLM call (%s) failed for %s: %s — NEUTRAL", model, symbol, exc)
+            self.logger.warning("%s failed for %s: %s — defaulting to NEUTRAL.", model, symbol, exc)
             return "NEUTRAL", 0.0
 
     async def _llm_evaluate(
@@ -804,14 +804,14 @@ class BacktestEngine:
         daily_global_pnl: dict[str, float] = {}
 
         for symbol in tickers:
-            self.logger.info("Fetching historical bars for %s...", symbol)
+            self.logger.info("Fetching history for %s...", symbol)
             bars = await self._fetch_bars(symbol, duration)
             bars_5m = bars.get("5 mins", [])
             bars_1h = bars.get("1 hour", [])
             n5 = len(bars_5m)
             n1 = len(bars_1h)
             result.bars_fetched[symbol] = n5
-            self.logger.info("%s → 5m=%d bars, 1h=%d bars", symbol, n5, n1)
+            self.logger.info("%s: 5m=%d bars, 1h=%d bars.", symbol, n5, n1)
 
             if n5 == 0:
                 self.logger.warning("Skipping %s — IBKR returned 0 bars (pacing or data issue).", symbol)
@@ -829,7 +829,7 @@ class BacktestEngine:
                 await asyncio.sleep(self.IBKR_SYMBOL_PAUSE)
                 continue
 
-            self.logger.info("Replaying %s — %d bars (LLM active)", symbol, n5)
+            self.logger.info("Replaying %s (%d bars, LLM active)...", symbol, n5)
             sym_trades, equity, sig_count = await self._replay_symbol(
                 symbol, bars_5m, bars_1h, equity,
                 daily_global_pnl=daily_global_pnl,
@@ -838,7 +838,7 @@ class BacktestEngine:
             result.signals_fired[symbol] = sig_count
             all_trades.extend(sym_trades)
             self.logger.info(
-                "%s done | trades=%d | signals=%d | equity_after=%.2f",
+                "%s done — %d trades, %d signals, equity $%.2f.",
                 symbol, len(sym_trades), sig_count, equity,
             )
 
@@ -862,7 +862,7 @@ class BacktestEngine:
         result.total_commissions = 2.0 * self.commission_per_trade * result.total_trades
 
         self.logger.info(
-            "Backtest complete | trades=%d | return=%.2f%% | sharpe=%.2f | max_dd=%.2f%%",
+            "Backtest complete — %d trades, %.2f%% return, Sharpe %.2f, max DD %.2f%%.",
             result.total_trades,
             result.total_return * 100,
             result.sharpe_ratio,

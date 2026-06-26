@@ -196,7 +196,7 @@ async def main() -> None:
         sys.exit(1)
 
     # Run screener once at startup (with brief delay to ensure APIs are ready)
-    logger.info("Waiting 2 seconds before screener startup...")
+    logger.info("Starting screener in 2s...")
     await asyncio.sleep(2)
 
     screener = VolumeGainerScreener()
@@ -204,10 +204,10 @@ async def main() -> None:
 
     if screened_tickers:
         settings["tickers"] = screened_tickers
-        logger.info(f"Using screened tickers: {screened_tickers}")
+        logger.info(f"Trading screened tickers: {screened_tickers}")
     else:
         fallback_tickers = settings.get("tickers", [])
-        logger.warning(f"Screener failed, using fallback from settings.yaml: {fallback_tickers}")
+        logger.warning(f"Screener empty — using fallback tickers from settings.yaml: {fallback_tickers}")
 
     client = IBKRClient(settings)
     order_manager = OrderManager(client)
@@ -220,7 +220,7 @@ async def main() -> None:
 
     async def _subscribe_if_new(symbol: str) -> None:
         if symbol not in client.data_buffer:
-            logger.info("Subscribing new ticker from Discord command: %s", symbol)
+            logger.info("Adding ticker from Discord: %s", symbol)
             await client._subscribe_to_ticker(symbol)
         else:
             logger.debug("Ticker %s already buffered, skipping re-subscription.", symbol)
@@ -282,7 +282,7 @@ async def main() -> None:
     app.state.order_manager = order_manager
 
     def graceful_shutdown() -> None:
-        logger.info("Shutdown signal received. Initiating graceful exit...")
+        logger.info("Shutdown signal received — exiting gracefully...")
         shutdown_event.set()
 
     try:
@@ -322,8 +322,8 @@ async def main() -> None:
                 if account_eq > 0 and daily_net < -(DAILY_LOSS_LIMIT_PCT * account_eq):
                     circuit_breaker["halted"] = True
                     logger.warning(
-                        "CIRCUIT BREAKER FIRED — daily loss %.2f exceeds %.1f%% limit. "
-                        "New entries blocked for the rest of the session.",
+                        "Circuit breaker tripped — daily loss $%.2f exceeds %.1f%% limit. "
+                        "No new entries for the rest of the session.",
                         daily_net, DAILY_LOSS_LIMIT_PCT * 100,
                     )
                     asyncio.create_task(discord_ui.send_circuit_breaker_alert(
@@ -392,22 +392,22 @@ async def main() -> None:
                 market_story=str(trade_memory.get("technical_context", "")) if trade_memory else "",
             )
             results.append(f"{symbol}: {action} {close_qty} shares [{reason}]")
-            logger.info("Closed %s x%d via %s — reason: %s", symbol, close_qty, action, reason)
+            logger.info("Closed %s x%d via %s — %s.", symbol, close_qty, action, reason)
         return results
 
     discord_ui.on_manual_sell = liquidate_all_positions
     discord_ui.circuit_breaker = circuit_breaker
 
     try:
-        logger.info("Starting...")
+        logger.info("OpenClaw starting up...")
         if discord_token:
-            logger.info("Discord token loaded securely. Starting Discord UI...")
+            logger.info("Discord token found — starting Discord UI...")
             asyncio.create_task(discord_ui.start(discord_token))
         else:
-            logger.warning("DISCORD_TOKEN is missing from the environment; Discord UI will not start.")
+            logger.warning("DISCORD_TOKEN missing — Discord UI disabled.")
 
         async def _stream_news() -> None:
-            logger.info("Starting news stream...")
+            logger.info("Starting news/signal loop...")
 
             async def _build_trade_snapshot(symbol: str) -> tuple[str, float, float, str]:
                 bars_5m = list(client.data_buffer.get(symbol, {}).get("5 mins", []))
@@ -494,8 +494,7 @@ async def main() -> None:
                 # Gate all order execution to regular market hours only.
                 if not is_market_open():
                     logger.info(
-                        "Pre/after-market signal detected for %s | signal=%s | confidence=%.2f | "
-                        "Evaluating only — execution gated until 09:30 ET.",
+                        "%s signal %s (%.2f) outside market hours — noted, no order until 09:30 ET.",
                         symbol, signal_direction, confidence,
                     )
                     return
@@ -507,18 +506,18 @@ async def main() -> None:
 
                 if signal_direction == "BULLISH" and not is_holding:
                     if circuit_breaker["halted"]:
-                        logger.info("Circuit breaker active — skipping BUY for %s.", symbol)
+                        logger.info("Circuit breaker on — no BUY for %s.", symbol)
                         return
 
                     last_buy = last_buy_time.get(symbol_key)
                     last_sell = last_sell_time.get(symbol_key)
 
                     if last_buy and now - last_buy < timedelta(minutes=15):
-                        logger.info("Skipping BUY for %s due to buy cooldown.", symbol)
+                        logger.info("%s: BUY skipped (buy cooldown).", symbol)
                         return
 
                     if last_sell and now - last_sell < timedelta(minutes=15):
-                        logger.info("Skipping BUY for %s due to recent sell cooldown.", symbol)
+                        logger.info("%s: BUY skipped (recent sell cooldown).", symbol)
                         return
 
                     account_equity = order_manager.get_account_equity()
@@ -526,8 +525,7 @@ async def main() -> None:
                     calculated_shares = (target_capital / current_price) if current_price > 0.0 else 0.0
                     trade_size = max(1, int(calculated_shares))
                     logger.info(
-                        "Sizing check | %s | equity=%.2f | target_capital=%.2f | current_price=%.2f | "
-                        "calculated_shares=%.2f | executed_quantity=%d",
+                        "%s sizing | equity $%.2f | target $%.2f | price $%.2f | shares %.2f → %d",
                         symbol, account_equity, target_capital, current_price, calculated_shares, trade_size,
                     )
 
@@ -555,7 +553,7 @@ async def main() -> None:
                         stop_loss=stop_loss,
                         quantity=trade_size,
                     )
-                    logger.info("BUY executed for %s with quantity %d.", symbol, trade_size)
+                    logger.info("BUY filled: %s x%d.", symbol, trade_size)
                     return
 
                 if is_holding:
@@ -572,8 +570,7 @@ async def main() -> None:
                         if loss_pct >= 2.0:
                             sell_quantity = max(1, int(abs(holding_quantity)))
                             logger.warning(
-                                "EMERGENCY STOP-LOSS TRIGGERED for %s | entry_price=%.2f | "
-                                "current_price=%.2f | loss_pct=%.2f | quantity=%d",
+                                "Stop-loss hit: %s | entry $%.2f → now $%.2f (−%.2f%%) | selling %d.",
                                 symbol, entry_price, current_price, loss_pct, sell_quantity,
                             )
 
@@ -605,13 +602,13 @@ async def main() -> None:
                                 exit_reason="2% stop-loss triggered",
                                 market_story=technical_context,
                             )
-                            logger.info("Close executed for %s x%d — 2%% stop-loss.", symbol, sell_quantity)
+                            logger.info("Closed %s x%d — 2%% stop-loss.", symbol, sell_quantity)
                             return
 
                 if signal_direction == "BEARISH" and is_holding:
                     last_buy = last_buy_time.get(symbol_key)
                     if last_buy and now - last_buy < timedelta(minutes=5):
-                        logger.info("Skipping SELL for %s because the minimum hold time has not elapsed.", symbol)
+                        logger.info("%s: SELL skipped (min hold not met).", symbol)
                         return
 
                     sell_quantity = max(1, int(abs(holding_quantity)))
@@ -646,11 +643,11 @@ async def main() -> None:
                         exit_reason="AI bearish signal",
                         market_story=technical_context,
                     )
-                    logger.info("Close executed for %s x%d — AI bearish signal.", symbol, sell_quantity)
+                    logger.info("Closed %s x%d — AI bearish signal.", symbol, sell_quantity)
                     return
 
                 logger.info(
-                    "No autonomous trade executed for %s | holding=%s | signal=%s",
+                    "No trade for %s (holding=%s, signal=%s).",
                     symbol, is_holding, signal_direction,
                 )
 
@@ -670,14 +667,14 @@ async def main() -> None:
 
                 # End of Day recap — sent once in the 10-minute window after close
                 if _is_just_after_close() and eod_recap_sent_date != today_et:
-                    logger.info("Market closed. Sending EoD recap.")
+                    logger.info("Market closed — sending end-of-day recap.")
                     stats = _compute_eod_stats(daily_closed_trades, order_manager.get_account_equity())
                     await discord_ui.send_eod_recap(stats)
                     eod_recap_sent_date = today_et
 
                 # Pre-close forced liquidation — clear all positions 10 min before close
                 if _is_pre_close() and eod_liquidation_done_date != today_et:
-                    logger.info("Pre-close window reached. Liquidating all positions.")
+                    logger.info("Pre-close — liquidating all positions.")
                     await liquidate_all_positions(reason="End-of-Day")
                     eod_liquidation_done_date = today_et
 
@@ -718,7 +715,7 @@ async def main() -> None:
                             trailing_stop_level = highest_price_seen - (2 * current_atr)
                             if current_price > 0.0 and current_price <= trailing_stop_level:
                                 sell_quantity = max(1, int(abs(holding_quantity)))
-                                logger.warning("ATR TRAILING STOP TRIGGERED for %s", symbol)
+                                logger.warning("ATR trailing stop hit: %s.", symbol)
 
                                 await order_manager.execute_trade(symbol, "SELL", sell_quantity)
                                 last_sell_time[symbol_key] = datetime.now(timezone.utc)
@@ -747,13 +744,13 @@ async def main() -> None:
                                     exit_reason="ATR trailing stop",
                                     market_story=technical_context,
                                 )
-                                logger.info("Close executed for %s x%d — ATR trailing stop.", symbol, sell_quantity)
+                                logger.info("Closed %s x%d — ATR trailing stop.", symbol, sell_quantity)
                                 continue
 
                             take_profit_level = entry_price + (3 * initial_atr)
                             if entry_price > 0.0 and initial_atr > 0.0 and current_price >= take_profit_level:
                                 sell_quantity = max(1, int(abs(holding_quantity)))
-                                logger.warning("TAKE PROFIT TARGET MET for %s", symbol)
+                                logger.warning("Take-profit hit: %s.", symbol)
 
                                 await order_manager.execute_trade(symbol, "SELL", sell_quantity)
                                 last_sell_time[symbol_key] = datetime.now(timezone.utc)
@@ -782,7 +779,7 @@ async def main() -> None:
                                     exit_reason="Take-profit target met",
                                     market_story=technical_context,
                                 )
-                                logger.info("Close executed for %s x%d — take profit.", symbol, sell_quantity)
+                                logger.info("Closed %s x%d — take-profit.", symbol, sell_quantity)
                                 continue
 
                     # News evaluation runs continuously (pre-market builds context, only executes when open)

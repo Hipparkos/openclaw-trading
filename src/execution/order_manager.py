@@ -34,7 +34,7 @@ class OrderManager:
             if previous_status != status:
                 self.order_states[order_id] = status
                 self.logger.info(
-                    "Order %s %s: %s -> %s",
+                    "Order %s (%s): %s → %s",
                     order_id,
                     symbol,
                     previous_status or "New",
@@ -42,7 +42,7 @@ class OrderManager:
                 )
 
             if status in {"Rejected", "Inactive", "ApiCancelled"}:
-                self.logger.warning("Order %s %s ended with status %s", order_id, symbol, status)
+                self.logger.warning("Order %s (%s) was not filled — status %s.", order_id, symbol, status)
         except Exception as exc:
             self.logger.exception("Failed to process order status update: %s", exc)
 
@@ -64,7 +64,7 @@ class OrderManager:
             trade = self.ib.placeOrder(contract, order)
 
             self.logger.info(
-                "Placed order for %s x%s",
+                "Submitted order: %s x%s",
                 symbol,
                 getattr(order, "totalQuantity", "?"),
             )
@@ -108,7 +108,7 @@ class OrderManager:
 
                 return float(str(value).replace(",", ""))
         except Exception as exc:
-            self.logger.warning("Failed to fetch account equity: %s", exc)
+            self.logger.warning("Could not read account equity: %s", exc)
 
         return 0.0
 

@@ -80,7 +80,7 @@ class NewsClient:
                 return None
             return np.array(vector, dtype=np.float32).tobytes()
         except Exception as exc:
-            self.logger.warning("Failed to fetch embedding: %s", exc)
+            self.logger.warning("Could not fetch embedding: %s", exc)
             return None
 
     def record_trade_memory(
@@ -120,7 +120,7 @@ class NewsClient:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 embedding_bytes = await self._get_embedding(technical_context, session)
         except Exception as exc:
-            self.logger.warning("Embedding fetch skipped during trade recording: %s", exc)
+            self.logger.warning("Skipped embedding during trade recording: %s", exc)
         self.record_trade_memory(symbol, technical_context, prediction, outcome, embedding_bytes)
 
     def _fetch_live_memory_injection(
@@ -287,7 +287,7 @@ class NewsClient:
         headline: str,
     ) -> dict[str, Any]:
         url = "http://openclaw_ollama:11434/api/chat"
-        self.logger.info("Requesting OpenClaw pattern evaluation for %s", ticker)
+        self.logger.info("openclaw: evaluating %s...", ticker)
 
         query_text = f"{technical_context} {headline}"
         query_embedding = await self._get_embedding(query_text, session)
@@ -356,8 +356,8 @@ class NewsClient:
             raw_response = str(message_content).strip()
             primary = self._parse_openclaw_response(raw_response)
             self.logger.info(
-                "Primary (openclaw) | ticker=%s | direction=%s | confidence=%.2f",
-                ticker, primary["direction"], primary["confidence"],
+                "openclaw verdict on %s: %s (%.0f%% confidence)",
+                ticker, primary["direction"], primary["confidence"] * 100,
             )
 
             # ── Qwen reviewer: only called on non-NEUTRAL primary signals ──────
@@ -387,15 +387,15 @@ class NewsClient:
             review_raw = str(review_data.get("message", {}).get("content", "")).strip()
             final = self._parse_openclaw_response(review_raw)
             self.logger.info(
-                "Reviewer (qwen) | ticker=%s | direction=%s | confidence=%.2f",
-                ticker, final["direction"], final["confidence"],
+                "qwen reviewer on %s: %s (%.0f%% confidence) — final decision",
+                ticker, final["direction"], final["confidence"] * 100,
             )
             return final
 
         except asyncio.TimeoutError:
-            self.logger.error("Timed out waiting for OpenClaw prediction for %s.", ticker)
+            self.logger.error("openclaw timed out on %s — skipping.", ticker)
         except Exception as exc:
-            self.logger.error("Failed to reach OpenClaw for %s: %s", ticker, exc)
+            self.logger.error("Could not reach openclaw for %s: %s", ticker, exc)
 
         return self._neutral_openclaw_prediction()
 
@@ -465,14 +465,14 @@ class NewsClient:
             ticker = await asyncio.to_thread(yf.Ticker, symbol)
             news_items = await asyncio.to_thread(getattr, ticker, "news")
         except Exception as e:
-            self.logger.warning(f"Failed to fetch yfinance news for {symbol}: {e}")
+            self.logger.warning(f"Could not fetch Yahoo news for {symbol}: {e}")
             return []
 
         normalized_news: list[NewsData] = []
         if not news_items:
             return normalized_news
 
-        self.logger.info(f"Found {len(news_items)} total articles for {symbol} on Yahoo.")
+        self.logger.info(f"{symbol}: {len(news_items)} Yahoo headlines found — evaluating up to 3 newest.")
 
         # 180s total: up to 3 articles × 2 LLM calls each × ~25s per call on CPU
         timeout = aiohttp.ClientTimeout(total=180, connect=10, sock_read=90)
@@ -483,7 +483,7 @@ class NewsClient:
                     item, ("title", "headline", "summary", "description", "content")
                 )
                 if not headline:
-                    self.logger.warning("Skipping Yahoo news item without headline (id=%s)", item.get("id", "unknown"))
+                    self.logger.warning("Skipped a Yahoo item with no headline (id=%s).", item.get("id", "unknown"))
                     continue
                 valid_items.append((item, headline))
 
@@ -507,12 +507,12 @@ class NewsClient:
                 sentiment_score = self._prediction_to_score(prediction)
 
                 self.logger.info(
-                    "Title: %s | URL: %s | Direction: %s | Confidence: %.2f | Sentiment Score: %.2f",
+                    "News verdict: %s → %s (confidence %.2f, sentiment %.2f) | %s",
                     headline,
-                    url,
                     prediction["direction"],
                     prediction["confidence"],
                     sentiment_score,
+                    url,
                 )
 
                 pub_time = item.get("providerPublishTime")
