@@ -1,9 +1,113 @@
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 
 
 class StrategyEngine:
+    def compute_alignment_signal(
+        self,
+        df_5m: pd.DataFrame,
+        df_1h: pd.DataFrame | None = None,
+        signal_threshold: int = 3,
+        warmup_bars: int = 50,
+    ) -> tuple[str, float]:
+        """Pure indicator-alignment signal — four binary votes (RSI, MACD, price
+        vs VWAP, price vs SMA-5) gated by a clear hourly trend and adequate volume.
+
+        Returns (direction, confidence) where confidence is the fraction of
+        indicators that voted for the winning side (0.0–1.0). Shared by live
+        trading and the backtest so both gate entries identically.
+        """
+        if df_5m is None or df_5m.empty or len(df_5m) < warmup_bars:
+            return "NEUTRAL", 0.0
+
+        row = df_5m.iloc[-1]
+
+        def _v(key: str) -> float | None:
+            val = row.get(key)
+            if val is None or (isinstance(val, float) and math.isnan(val)):
+                return None
+            return float(val)
+
+        close = _v("close")
+
+        # Hard gate: 1h macro trend must be clear and unambiguous. NEUTRAL hourly
+        # (price straddling SMA_50) blocks all entries.
+        hourly_direction = "NEUTRAL"
+        if df_1h is not None and not df_1h.empty:
+            h = df_1h.iloc[-1]
+            h_close = h.get("close")
+            h_sma50 = h.get("sma_50")
+            if h_close is not None and h_sma50 is not None:
+                try:
+                    hc, hs = float(h_close), float(h_sma50)
+                    if not (math.isnan(hc) or math.isnan(hs)):
+                        if hc > hs:
+                            hourly_direction = "BULLISH"
+                        elif hc < hs:
+                            hourly_direction = "BEARISH"
+                except (TypeError, ValueError):
+                    pass
+
+        if hourly_direction == "NEUTRAL":
+            return "NEUTRAL", 0.0
+
+        # Volume confirmation gate — low-volume bars produce unreliable breakouts.
+        vol = row.get("volume")
+        vol_sma = row.get("volume_sma_20")
+        if vol is not None and vol_sma is not None:
+            try:
+                vol_f, vsma_f = float(vol), float(vol_sma)
+                if vsma_f > 0 and not math.isnan(vol_f) and not math.isnan(vsma_f):
+                    if vol_f / vsma_f < 0.8:
+                        return "NEUTRAL", 0.0
+            except (TypeError, ValueError):
+                pass
+
+        # 5m indicator votes (4 signals)
+        score = 0
+        components = 0
+
+        rsi = _v("rsi_14")
+        if rsi is not None:
+            components += 1
+            score += 1 if rsi > 55 else (-1 if rsi < 45 else 0)
+
+        macd, macd_s = _v("MACD_6_20_9"), _v("MACDs_6_20_9")
+        if macd is not None and macd_s is not None:
+            components += 1
+            score += 1 if macd > macd_s else (-1 if macd < macd_s else 0)
+
+        vwap = _v("vwap")
+        if close is not None and vwap is not None:
+            components += 1
+            score += 1 if close > vwap else (-1 if close < vwap else 0)
+
+        sma5 = _v("sma_5")
+        if close is not None and sma5 is not None:
+            components += 1
+            score += 1 if close > sma5 else (-1 if close < sma5 else 0)
+
+        if components == 0:
+            return "NEUTRAL", 0.0
+
+        confidence = abs(score) / components
+
+        if score >= signal_threshold:
+            direction = "BULLISH"
+        elif score <= -signal_threshold:
+            direction = "BEARISH"
+        else:
+            return "NEUTRAL", 0.0
+
+        # Entry must agree with the hourly macro trend.
+        if direction != hourly_direction:
+            return "NEUTRAL", 0.0
+
+        return direction, confidence
+
     def evaluate_hourly_trend(self, df: pd.DataFrame) -> str:
         """Evaluate the overall trend direction from hourly data.
 
