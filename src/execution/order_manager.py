@@ -130,6 +130,31 @@ class OrderManager:
         order = StopOrder(action.upper(), quantity, stop_price, tif="DAY")
         return await self._place_order(symbol, order)
 
+    # Bracket entry - market BUY with an attached protective stop.
+    # The stop is a child of the BUY (parentId + transmit), so IBKR only
+    # activates it once the parent fills. This prevents a naked resting stop
+    # if the entry is delayed or rejected, and the two orders submit atomically.
+    async def place_bracket_buy(
+        self, symbol: str, quantity: float, stop_price: float
+    ) -> tuple[Any, Any]:
+        contract = await self._qualify_stock(symbol)
+
+        parent = MarketOrder("BUY", quantity, tif="DAY")
+        parent.orderId = self.ib.client.getReqId()
+        parent.transmit = False
+
+        stop = StopOrder("SELL", quantity, stop_price, tif="DAY")
+        stop.orderId = self.ib.client.getReqId()
+        stop.parentId = parent.orderId
+        stop.transmit = True
+
+        parent_trade = self.ib.placeOrder(contract, parent)
+        stop_trade = self.ib.placeOrder(contract, stop)
+        self.logger.info(
+            "Bracket BUY: %s x%s with attached stop $%.2f", symbol, quantity, stop_price
+        )
+        return parent_trade, stop_trade
+
     # Cancel a resting order - used to clear a protective stop on early exit
     def cancel_order(self, trade: Any) -> None:
         order = getattr(trade, "order", None)

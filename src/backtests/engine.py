@@ -293,113 +293,21 @@ class BacktestEngine:
         cached_df_1h=None,
     ) -> tuple[str, float]:
         """
-        Pure indicator-alignment signal.  Mirrors what the LLM synthesises from
-        the same inputs — five binary votes, threshold = 2 net in either direction.
-
-        Returns (direction, confidence) where confidence is the fraction of
-        indicators that voted for the winning side (0.0–1.0).
+        Thin wrapper over StrategyEngine.compute_alignment_signal so the backtest
+        and live trading gate entries with the exact same logic.
         cached_df: pre-computed result of calculate_all(window_5m) to avoid recomputing.
         cached_df_1h: pre-computed 1h DataFrame slice — skips calculate_all(window_1h).
         """
-        if len(window_5m) < self.WARMUP_BARS:
-            return "NEUTRAL", 0.0
-
         df = cached_df if cached_df is not None else self._calc.calculate_all(window_5m)
-        if df is None or df.empty:
-            return "NEUTRAL", 0.0
-
-        row = df.iloc[-1]
-        score = 0
-        components = 0
-
-        def _v(key: str) -> float | None:
-            val = row.get(key)
-            if val is None or (isinstance(val, float) and math.isnan(val)):
-                return None
-            return float(val)
-
-        close = _v("close")
-
-        # ── Hard gate: 1h macro trend must be clear and unambiguous ────────────
-        # Any entry that opposes the hourly direction is rejected outright.
-        # NEUTRAL hourly (price straddling SMA_50) also blocks all entries.
-        hourly_direction = "NEUTRAL"
         df_1h = cached_df_1h if cached_df_1h is not None else (
             self._calc.calculate_all(window_1h) if len(window_1h) >= 50 else pd.DataFrame()
         )
-        if not df_1h.empty:
-            h = df_1h.iloc[-1]
-            h_close = h.get("close")
-            h_sma50 = h.get("sma_50")
-            if h_close is not None and h_sma50 is not None:
-                try:
-                    hc, hs = float(h_close), float(h_sma50)
-                    if not (math.isnan(hc) or math.isnan(hs)):
-                        if hc > hs:
-                            hourly_direction = "BULLISH"
-                        elif hc < hs:
-                            hourly_direction = "BEARISH"
-                except (TypeError, ValueError):
-                    pass
-
-        if hourly_direction == "NEUTRAL":
-            return "NEUTRAL", 0.0
-
-        # ── Volume confirmation gate ─────────────────────────────────────────────
-        # Low-volume bars produce unreliable breakouts — skip them
-        vol = row.get("volume")
-        vol_sma = row.get("volume_sma_20")
-        if vol is not None and vol_sma is not None:
-            try:
-                vol_f, vsma_f = float(vol), float(vol_sma)
-                if vsma_f > 0 and not math.isnan(vol_f) and not math.isnan(vsma_f):
-                    if vol_f / vsma_f < 0.8:
-                        return "NEUTRAL", 0.0
-            except (TypeError, ValueError):
-                pass
-
-        # ── 5m indicator votes (4 signals) ──────────────────────────────────────
-        # 1. RSI momentum
-        rsi = _v("rsi_14")
-        if rsi is not None:
-            components += 1
-            score += 1 if rsi > 55 else (-1 if rsi < 45 else 0)
-
-        # 2. MACD crossover
-        macd, macd_s = _v("MACD_6_20_9"), _v("MACDs_6_20_9")
-        if macd is not None and macd_s is not None:
-            components += 1
-            score += 1 if macd > macd_s else (-1 if macd < macd_s else 0)
-
-        # 3. Price vs VWAP
-        vwap = _v("vwap")
-        if close is not None and vwap is not None:
-            components += 1
-            score += 1 if close > vwap else (-1 if close < vwap else 0)
-
-        # 4. Price vs SMA_5
-        sma5 = _v("sma_5")
-        if close is not None and sma5 is not None:
-            components += 1
-            score += 1 if close > sma5 else (-1 if close < sma5 else 0)
-
-        if components == 0:
-            return "NEUTRAL", 0.0
-
-        confidence = abs(score) / components
-
-        if score >= self.SIGNAL_THRESHOLD:
-            direction = "BULLISH"
-        elif score <= -self.SIGNAL_THRESHOLD:
-            direction = "BEARISH"
-        else:
-            return "NEUTRAL", 0.0
-
-        # ── Trend alignment check ────────────────────────────────────────────────
-        if direction != hourly_direction:
-            return "NEUTRAL", 0.0
-
-        return direction, confidence
+        # Single source of truth — identical gate used by live trading.
+        return self._strategy.compute_alignment_signal(
+            df, df_1h,
+            signal_threshold=self.SIGNAL_THRESHOLD,
+            warmup_bars=self.WARMUP_BARS,
+        )
 
     # ── LLM evaluation ─────────────────────────────────────────────────────────
 

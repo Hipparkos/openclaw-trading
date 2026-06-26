@@ -273,7 +273,11 @@ async def main() -> None:
     daily_closed_trades: List[Dict[str, Any]] = []
     # Mutable dict so nested functions can mutate without nonlocal
     circuit_breaker = {"halted": False}
+    # Risk/exit constants — kept identical to BacktestEngine so live mirrors the backtest
     DAILY_LOSS_LIMIT_PCT = 0.005  # halt new entries when day P&L < -0.5% equity
+    ATR_TRAIL_MULT = 2.5          # trailing stop = peak − 2.5 × entry-time ATR
+    TAKE_PROFIT_ATR_MULT = 3.0    # take-profit = entry + 3.0 × entry-time ATR
+    MIN_HOLD_MINUTES = 25         # 5 × 5m bars before take-profit / reversal exits
     eod_recap_sent_date: Optional[date] = None
     eod_liquidation_done_date: Optional[date] = None
 
@@ -362,12 +366,13 @@ async def main() -> None:
             action = "SELL" if is_long else "BUY"
             close_qty = max(1, int(abs(quantity)))
 
-            await order_manager.execute_trade(symbol, action, close_qty)
             symbol_key = symbol.upper().strip()
-            last_sell_time[symbol_key] = now
-
+            # Cancel the protective stop before closing so the two can't both fill.
             trade_memory = open_trade_memory.pop(symbol_key, None)
             _cancel_resting_stop(trade_memory)
+
+            await order_manager.execute_trade(symbol, action, close_qty)
+            last_sell_time[symbol_key] = now
             entry_price = 0.0
             entry_time_mem = None
             if trade_memory:
@@ -425,12 +430,12 @@ async def main() -> None:
             async def _build_trade_snapshot(symbol: str) -> tuple[str, float, float, str]:
                 bars_5m = list(client.data_buffer.get(symbol, {}).get("5 mins", []))
                 if len(bars_5m) < 2:
-                    return "Insufficient 5-minute market data yet.", 0.0, 0.0, "NEUTRAL"
+                    return "Insufficient 5-minute market data yet.", 0.0, 0.0, "NEUTRAL", "NEUTRAL", 0.0
 
                 indicator_calculator = IndicatorCalculator()
                 df_5m = await asyncio.to_thread(indicator_calculator.calculate_all, bars_5m)
                 if df_5m.empty:
-                    return "Technical dataframe is empty.", 0.0, 0.0, "NEUTRAL"
+                    return "Technical dataframe is empty.", 0.0, 0.0, "NEUTRAL", "NEUTRAL", 0.0
 
                 strategy_engine = StrategyEngine()
                 technical_5m = await asyncio.to_thread(strategy_engine.evaluate_signals, df_5m)
@@ -439,6 +444,7 @@ async def main() -> None:
                 bars_1h = list(client.data_buffer.get(symbol, {}).get("1 hour", []))
                 hourly_trend = ""
                 hourly_direction = "NEUTRAL"
+                df_1h = None
                 if len(bars_1h) >= 2:
                     df_1h = await asyncio.to_thread(indicator_calculator.calculate_all, bars_1h)
                     if not df_1h.empty:
@@ -487,7 +493,14 @@ async def main() -> None:
                 except (TypeError, ValueError):
                     current_atr = 0.0
 
-                return technical_context, current_price, current_atr, hourly_direction
+                # Technical alignment gate — same logic the backtest uses to qualify
+                # an entry (hourly trend + volume + 3/4 indicator vote).
+                tech_dir, tech_conf = await asyncio.to_thread(
+                    strategy_engine.compute_alignment_signal, df_5m, df_1h
+                )
+
+                return (technical_context, current_price, current_atr,
+                        hourly_direction, tech_dir, tech_conf)
 
             def _trade_outcome(entry_price: float, exit_price: float) -> str:
                 if entry_price <= 0.0 or exit_price <= 0.0:
@@ -522,6 +535,12 @@ async def main() -> None:
                         logger.info("Circuit breaker on — no BUY for %s.", symbol)
                         return
 
+                    # Opening 30-minute noise filter (9:30–10:00 ET) — mirrors the
+                    # backtest, which skips entries while the hour is 9 in RTH data.
+                    if datetime.now(_ET).hour == 9:
+                        logger.info("%s: BUY skipped (opening 30-min filter).", symbol)
+                        return
+
                     last_buy = last_buy_time.get(symbol_key)
                     last_sell = last_sell_time.get(symbol_key)
 
@@ -533,6 +552,11 @@ async def main() -> None:
                         logger.info("%s: BUY skipped (recent sell cooldown).", symbol)
                         return
 
+                    # Need a valid price to size the order and set the protective stop.
+                    if current_price <= 0.0:
+                        logger.warning("%s: BUY skipped — no valid price yet.", symbol)
+                        return
+
                     account_equity = order_manager.get_account_equity()
                     target_capital = account_equity * 0.015 * confidence if account_equity > 0.0 else 0.0
                     calculated_shares = (target_capital / current_price) if current_price > 0.0 else 0.0
@@ -542,22 +566,27 @@ async def main() -> None:
                         symbol, account_equity, target_capital, current_price, calculated_shares, trade_size,
                     )
 
-                    await order_manager.execute_trade(symbol, "BUY", trade_size)
-                    last_buy_time[symbol_key] = now
-
-                    # Place a resting 2% stop order at the broker so a fast adverse move
-                    # fills near the stop intrabar — matching the backtest's stop model
-                    # instead of relying on this loop to catch the breach late.
+                    # Enter with a bracket order: a market BUY plus an attached resting
+                    # 2% stop. The stop activates only when the BUY fills (so it can never
+                    # rest naked) and fills near the stop intrabar — matching the backtest's
+                    # stop model instead of relying on this loop to catch the breach late.
                     stop_price = round(current_price * 0.98, 2) if current_price > 0.0 else 0.0
                     stop_trade = None
                     if stop_price > 0.0:
                         try:
-                            stop_trade = await order_manager.place_stop_order(
-                                symbol, "SELL", trade_size, stop_price
+                            _, stop_trade = await order_manager.place_bracket_buy(
+                                symbol, trade_size, stop_price
                             )
-                            logger.info("Resting stop placed for %s at $%.2f (−2%%).", symbol, stop_price)
+                            logger.info("BUY %s x%d with resting stop at $%.2f (−2%%).",
+                                        symbol, trade_size, stop_price)
                         except Exception as exc:
-                            logger.warning("Could not place resting stop for %s: %s", symbol, exc)
+                            logger.warning("Bracket BUY failed for %s: %s — using plain market order.",
+                                           symbol, exc)
+                            await order_manager.execute_trade(symbol, "BUY", trade_size)
+                    else:
+                        await order_manager.execute_trade(symbol, "BUY", trade_size)
+
+                    last_buy_time[symbol_key] = now
 
                     open_trade_memory[symbol_key] = {
                         "technical_context": technical_context,
@@ -640,16 +669,17 @@ async def main() -> None:
 
                 if signal_direction == "BEARISH" and is_holding:
                     last_buy = last_buy_time.get(symbol_key)
-                    if last_buy and now - last_buy < timedelta(minutes=5):
+                    if last_buy and now - last_buy < timedelta(minutes=MIN_HOLD_MINUTES):
                         logger.info("%s: SELL skipped (min hold not met).", symbol)
                         return
 
                     sell_quantity = max(1, int(abs(holding_quantity)))
-                    await order_manager.execute_trade(symbol, "SELL", sell_quantity)
-                    last_sell_time[symbol_key] = now
-
+                    # Cancel the protective stop before closing so the two can't both fill.
                     trade_memory = open_trade_memory.pop(symbol_key, None)
                     _cancel_resting_stop(trade_memory)
+
+                    await order_manager.execute_trade(symbol, "SELL", sell_quantity)
+                    last_sell_time[symbol_key] = now
                     entry_price_mem = 0.0
                     entry_time_mem = None
                     if trade_memory:
@@ -715,7 +745,8 @@ async def main() -> None:
                 for symbol in settings["tickers"]:
                     if settings.get("backtest_mode"):
                         break
-                    technical_context, current_price, current_atr, hourly_direction = await _build_trade_snapshot(symbol)
+                    (technical_context, current_price, current_atr,
+                     hourly_direction, tech_dir, tech_conf) = await _build_trade_snapshot(symbol)
 
                     holding_quantity = order_manager.get_position(symbol)
                     is_holding = holding_quantity != 0.0
@@ -792,16 +823,19 @@ async def main() -> None:
 
                             entry_conf = float(trade_memory.get("entry_confidence", 0.0))
 
-                            trailing_stop_level = highest_price_seen - (2 * current_atr)
-                            if current_price > 0.0 and current_price <= trailing_stop_level:
+                            # Trailing stop anchored to entry-time ATR (not current ATR),
+                            # so the distance can't widen mid-trade — mirrors the backtest.
+                            trailing_stop_level = highest_price_seen - (ATR_TRAIL_MULT * initial_atr)
+                            if initial_atr > 0.0 and current_price > 0.0 and current_price <= trailing_stop_level:
                                 sell_quantity = max(1, int(abs(holding_quantity)))
                                 logger.warning("ATR trailing stop hit: %s.", symbol)
 
-                                await order_manager.execute_trade(symbol, "SELL", sell_quantity)
-                                last_sell_time[symbol_key] = datetime.now(timezone.utc)
-
+                                # Cancel the protective stop before closing so the two can't both fill.
                                 stopped_trade_memory = open_trade_memory.pop(symbol_key, None)
                                 _cancel_resting_stop(stopped_trade_memory)
+
+                                await order_manager.execute_trade(symbol, "SELL", sell_quantity)
+                                last_sell_time[symbol_key] = datetime.now(timezone.utc)
                                 entry_time_mem = stopped_trade_memory.get("entry_time") if stopped_trade_memory else None
                                 if stopped_trade_memory:
                                     _record_closed_trade(entry_price, current_price, sell_quantity, entry_conf,
@@ -828,16 +862,24 @@ async def main() -> None:
                                 logger.info("Closed %s x%d — ATR trailing stop.", symbol, sell_quantity)
                                 continue
 
-                            take_profit_level = entry_price + (3 * initial_atr)
-                            if entry_price > 0.0 and initial_atr > 0.0 and current_price >= take_profit_level:
+                            # Take-profit, gated by the same 25-min minimum hold as the backtest.
+                            entry_time_tp = trade_memory.get("entry_time")
+                            held_long_enough = (
+                                entry_time_tp is not None
+                                and datetime.now(timezone.utc) - entry_time_tp >= timedelta(minutes=MIN_HOLD_MINUTES)
+                            )
+                            take_profit_level = entry_price + (TAKE_PROFIT_ATR_MULT * initial_atr)
+                            if (held_long_enough and entry_price > 0.0 and initial_atr > 0.0
+                                    and current_price >= take_profit_level):
                                 sell_quantity = max(1, int(abs(holding_quantity)))
                                 logger.warning("Take-profit hit: %s.", symbol)
 
-                                await order_manager.execute_trade(symbol, "SELL", sell_quantity)
-                                last_sell_time[symbol_key] = datetime.now(timezone.utc)
-
+                                # Cancel the protective stop before closing so the two can't both fill.
                                 stopped_trade_memory = open_trade_memory.pop(symbol_key, None)
                                 _cancel_resting_stop(stopped_trade_memory)
+
+                                await order_manager.execute_trade(symbol, "SELL", sell_quantity)
+                                last_sell_time[symbol_key] = datetime.now(timezone.utc)
                                 entry_time_mem = stopped_trade_memory.get("entry_time") if stopped_trade_memory else None
                                 if stopped_trade_memory:
                                     _record_closed_trade(entry_price, current_price, sell_quantity, entry_conf,
@@ -864,44 +906,68 @@ async def main() -> None:
                                 logger.info("Closed %s x%d — take-profit.", symbol, sell_quantity)
                                 continue
 
-                    # News evaluation runs continuously (pre-market builds context, only executes when open)
+                    # ── Entry / exit decision (mirrors the backtest) ─────────────
+                    # Only spend an LLM/news call when there's a reason to: flat with
+                    # a bullish technical setup (potential entry), or already holding
+                    # (potential news-driven exit). When flat with no qualifying setup
+                    # we skip news entirely — this matches the backtest's technical
+                    # pre-filter and saves API calls so the watchlist can hold more tickers.
+                    if not is_holding and tech_dir != "BULLISH":
+                        continue
+
                     news_items = await news_client.fetch_latest_news(symbol, technical_context=technical_context)
 
+                    # Strongest directional news verdict across the fetched headlines.
+                    llm_dir, llm_conf = "NEUTRAL", 0.0
                     for news_item in news_items:
                         logger.info(
                             "%s news | sentiment %.2f | %s",
-                            news_item.symbol,
-                            news_item.sentiment_score,
-                            news_item.headline,
+                            news_item.symbol, news_item.sentiment_score, news_item.headline,
                         )
-
-                        sentiment_score = news_item.sentiment_score
-                        if sentiment_score is None or sentiment_score != sentiment_score or sentiment_score == 0.0:
+                        score = news_item.sentiment_score
+                        if score is None or score != score or score == 0.0:
                             continue
+                        if abs(score) > llm_conf:
+                            llm_conf = abs(score)
+                            llm_dir = "BULLISH" if score > 0 else "BEARISH"
 
-                        confidence = abs(sentiment_score)
-                        if confidence < 0.60:
-                            continue
-
-                        signal_direction = "BULLISH" if sentiment_score > 0 else "BEARISH"
-
-                        # Trend alignment gate — reject signals that oppose the hourly macro direction
-                        if signal_direction != hourly_direction:
-                            logger.info(
-                                "%s: %s rejected by trend gate (hourly is %s).",
-                                symbol, signal_direction, hourly_direction,
+                    if is_holding:
+                        # Stops / take-profit / trailing are handled above; here we
+                        # close only on a confident bearish news read.
+                        if llm_dir == "BEARISH" and llm_conf >= 0.60:
+                            await _route_trade(
+                                symbol=symbol,
+                                signal_direction="BEARISH",
+                                technical_context=technical_context,
+                                current_price=current_price,
+                                current_atr=current_atr,
+                                confidence=llm_conf,
                             )
-                            continue
+                        continue
 
-                        await _route_trade(
-                            symbol=news_item.symbol,
-                            signal_direction=signal_direction,
-                            technical_context=technical_context,
-                            current_price=current_price,
-                            current_atr=current_atr,
-                            confidence=confidence,
-                        )
-                        break
+                    # Flat with a bullish technical setup. Resolve the final signal the
+                    # same way the backtest does: the news/LLM decides when it has an
+                    # opinion (≥0.60); otherwise fall back to the technical vote (≥0.55).
+                    if llm_dir != "NEUTRAL":
+                        final_dir, final_conf, min_conf = llm_dir, llm_conf, 0.60
+                    else:
+                        final_dir, final_conf, min_conf = tech_dir, tech_conf, 0.55
+
+                    if final_dir != "BULLISH":
+                        logger.info("%s: entry skipped — news vetoed setup (verdict %s).", symbol, final_dir)
+                        continue
+                    if final_conf < min_conf:
+                        logger.info("%s: entry skipped — confidence %.2f < %.2f.", symbol, final_conf, min_conf)
+                        continue
+
+                    await _route_trade(
+                        symbol=symbol,
+                        signal_direction="BULLISH",
+                        technical_context=technical_context,
+                        current_price=current_price,
+                        current_atr=current_atr,
+                        confidence=final_conf,
+                    )
 
                 # Sleep in 5-second increments so backtest_mode is noticed within 5 s
                 for _ in range(12):
