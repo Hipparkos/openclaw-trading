@@ -171,10 +171,14 @@ class IBKRClient:
 
     # Request bars - fetch and subscribe bars
     async def _request_historical_bars(self, contract: Stock, symbol: str, bar_size: str) -> None:
+        # The 1-hour frame feeds SMA-50 (the hourly-trend gate), which needs >=50
+        # bars. 3 days of 1h data is only ~48 bars, so the gate never passes — pull
+        # more history for the hourly frame specifically.
+        duration = "15 D" if bar_size == "1 hour" else "3 D"
         bars = await self.ib.reqHistoricalDataAsync(
             contract,
             endDateTime="",
-            durationStr="3 D",
+            durationStr=duration,
             barSizeSetting=bar_size,
             whatToShow="TRADES",
             useRTH=False,

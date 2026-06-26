@@ -742,6 +742,7 @@ async def main() -> None:
                     await liquidate_all_positions(reason="End-of-Day")
                     eod_liquidation_done_date = today_et
 
+                scan = {"held": 0, "bull_setup": 0, "hourly_neutral": 0}
                 for symbol in settings["tickers"]:
                     if settings.get("backtest_mode"):
                         break
@@ -751,6 +752,13 @@ async def main() -> None:
                     holding_quantity = order_manager.get_position(symbol)
                     is_holding = holding_quantity != 0.0
                     symbol_key = symbol.upper().strip()
+
+                    if is_holding:
+                        scan["held"] += 1
+                    if tech_dir == "BULLISH":
+                        scan["bull_setup"] += 1
+                    if hourly_direction == "NEUTRAL":
+                        scan["hourly_neutral"] += 1
 
                     # Reconcile broker-side stop fills: if the resting stop order has
                     # filled, the position is flat but we still hold trade memory. Record
@@ -967,6 +975,12 @@ async def main() -> None:
                         current_price=current_price,
                         current_atr=current_atr,
                         confidence=final_conf,
+                    )
+
+                if not settings.get("backtest_mode"):
+                    logger.info(
+                        "Scan: %d tickers | %d held | %d bullish setups | %d hourly-NEUTRAL (no 1h SMA-50?)",
+                        len(settings["tickers"]), scan["held"], scan["bull_setup"], scan["hourly_neutral"],
                     )
 
                 # Sleep in 5-second increments so backtest_mode is noticed within 5 s
