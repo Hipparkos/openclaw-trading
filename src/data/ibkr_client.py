@@ -116,9 +116,9 @@ class IBKRClient:
             self.data_buffer.setdefault(symbol, {}).setdefault(bar_size, []).append(normalized_bar)
             
             self.logger.info(
-                "%s [%s] bar | O %s H %s L %s C %s V %s",
-                symbol,
-                bar_size,
+                "%s [%s] | O: %s | H: %s | L: %s | C: %s | V: %s", 
+                symbol, 
+                bar_size, 
                 normalized_bar.open, 
                 normalized_bar.high, 
                 normalized_bar.low, 

@@ -787,7 +787,7 @@ async def main() -> None:
 
                     for news_item in news_items:
                         logger.info(
-                            "NEWS ALERT [%s] | AI Sentiment: %.2f | %s",
+                            "%s news | sentiment %.2f | %s",
                             news_item.symbol,
                             news_item.sentiment_score,
                             news_item.headline,
@@ -806,7 +806,7 @@ async def main() -> None:
                         # Trend alignment gate — reject signals that oppose the hourly macro direction
                         if signal_direction != hourly_direction:
                             logger.info(
-                                "Trend gate: %s %s rejected — hourly direction is %s",
+                                "%s: %s rejected by trend gate (hourly is %s).",
                                 symbol, signal_direction, hourly_direction,
                             )
                             continue
@@ -842,7 +842,7 @@ async def main() -> None:
                     raise
 
                 logger.warning(
-                    "IBKR startup handshake failed (%d/%d): %s. Retrying in 5 seconds.",
+                    "IBKR connect failed (%d/%d): %s — retrying in 5s.",
                     attempt, startup_attempts, exc,
                 )
                 await asyncio.sleep(5)
@@ -856,9 +856,9 @@ async def main() -> None:
     except asyncio.CancelledError:
         logger.info("Async tasks cancelled.")
     except Exception as e:
-        logger.error(f"An error occurred in the execution loop: {e}", exc_info=True)
+        logger.error(f"Execution loop error: {e}", exc_info=True)
     finally:
-        logger.info("Cleaning up connections...")
+        logger.info("Shutting down — cleaning up connections...")
         if server is not None:
             server.should_exit = True
         if server_task is not None:

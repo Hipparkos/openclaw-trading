@@ -340,7 +340,7 @@ class TradingCommands(commands.Cog):
 
             # Update bot's active tickers
             self.bot.settings["tickers"] = screened_tickers
-            logging.info(f"Discord !screener command updated tickers: {screened_tickers}")
+            logging.info(f"!screener updated tickers: {screened_tickers}")
 
             # Subscribe IBKR data feeds for any tickers not already buffered
             if callable(getattr(self.bot, "on_add_ticker", None)):
@@ -437,7 +437,7 @@ class OpenClawDiscord(commands.Bot):
         await self.add_cog(TradingCommands(self))
 
     async def on_ready(self):
-        logging.info(f"OpenClaw UI online. Hooked as: {self.user}")
+        logging.info(f"Discord UI online as {self.user}.")
 
     async def _get_target_channel(self):
         if not self.channel_id:
