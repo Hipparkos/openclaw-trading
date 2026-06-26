@@ -915,12 +915,28 @@ async def main() -> None:
                                 continue
 
                     # ── Entry / exit decision (mirrors the backtest) ─────────────
-                    # Only spend an LLM/news call when there's a reason to: flat with
-                    # a bullish technical setup (potential entry), or already holding
-                    # (potential news-driven exit). When flat with no qualifying setup
-                    # we skip news entirely — this matches the backtest's technical
-                    # pre-filter and saves API calls so the watchlist can hold more tickers.
-                    if not is_holding and tech_dir != "BULLISH":
+                    # Held position: exit on a technical signal reversal — exactly like
+                    # the backtest, which uses the cheap indicator vote (NOT a fresh
+                    # LLM/news call) for reversals. Stops / take-profit / trailing are
+                    # handled above. Never running the LLM on an open position is also
+                    # what stops a single held name from monopolising the CPU and
+                    # starving the rest of the watchlist.
+                    if is_holding:
+                        if tech_dir == "BEARISH":
+                            await _route_trade(
+                                symbol=symbol,
+                                signal_direction="BEARISH",
+                                technical_context=technical_context,
+                                current_price=current_price,
+                                current_atr=current_atr,
+                                confidence=tech_conf,
+                            )
+                        continue
+
+                    # Flat: the technical gate must qualify before we spend any LLM/news
+                    # call. Flat-with-no-setup tickers are skipped cheaply, so the whole
+                    # watchlist stays responsive every cycle.
+                    if tech_dir != "BULLISH":
                         continue
 
                     news_items = await news_client.fetch_latest_news(symbol, technical_context=technical_context)
@@ -938,20 +954,6 @@ async def main() -> None:
                         if abs(score) > llm_conf:
                             llm_conf = abs(score)
                             llm_dir = "BULLISH" if score > 0 else "BEARISH"
-
-                    if is_holding:
-                        # Stops / take-profit / trailing are handled above; here we
-                        # close only on a confident bearish news read.
-                        if llm_dir == "BEARISH" and llm_conf >= 0.60:
-                            await _route_trade(
-                                symbol=symbol,
-                                signal_direction="BEARISH",
-                                technical_context=technical_context,
-                                current_price=current_price,
-                                current_atr=current_atr,
-                                confidence=llm_conf,
-                            )
-                        continue
 
                     # Flat with a bullish technical setup. Resolve the final signal the
                     # same way the backtest does: the news/LLM decides when it has an
