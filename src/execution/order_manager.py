@@ -130,6 +130,12 @@ class OrderManager:
         order = StopOrder(action.upper(), quantity, stop_price, tif="DAY")
         return await self._place_order(symbol, order)
 
+    # Cancel a resting order - used to clear a protective stop on early exit
+    def cancel_order(self, trade: Any) -> None:
+        order = getattr(trade, "order", None)
+        if order is not None:
+            self.ib.cancelOrder(order)
+
     def close(self) -> None:
         try:
             self.ib.orderStatusEvent -= self._on_order_status

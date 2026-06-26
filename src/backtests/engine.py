@@ -611,15 +611,24 @@ class BacktestEngine:
             if in_position:
                 bars_held = i - entry_bar_idx
                 exit_reason: str | None = None
+                stop_fill: float | None = None   # set when a resting stop fills intrabar
+                bar_high = float(bar.high)
+                bar_low = float(bar.low)
 
-                # 1. Hard stop-loss
+                # 1. Hard stop-loss — modelled as a resting broker stop order, so it
+                #    fills intrabar at the stop level (or at the open if the bar gapped
+                #    through it), NOT at the next bar's open. This caps the realised loss
+                #    near STOP_LOSS_PCT instead of letting a fast bar blow far past it.
                 if direction == "LONG":
-                    loss_pct = (entry_price - current_price) / entry_price
+                    stop_level = entry_price * (1 - self.STOP_LOSS_PCT)
+                    if bar_low <= stop_level:
+                        exit_reason = "2% stop-loss"
+                        stop_fill = min(float(bar.open), stop_level)
                 else:
-                    loss_pct = (current_price - entry_price) / entry_price
-
-                if loss_pct >= self.STOP_LOSS_PCT:
-                    exit_reason = "2% stop-loss"
+                    stop_level = entry_price * (1 + self.STOP_LOSS_PCT)
+                    if bar_high >= stop_level:
+                        exit_reason = "2% stop-loss"
+                        stop_fill = max(float(bar.open), stop_level)
 
                 # 2. ATR trailing stop (anchored to initial_atr so the stop distance
                 #    doesn't widen during high-volatility moves mid-trade)
@@ -653,7 +662,9 @@ class BacktestEngine:
                         exit_reason = "Signal reversal"
 
                 if exit_reason:
-                    exit_price = fill_price
+                    # Resting stops fill intrabar at the stop price; signal/TP exits are
+                    # decided on the close, so they fill at the next bar's open.
+                    exit_price = stop_fill if stop_fill is not None else fill_price
                     if direction == "LONG":
                         pnl = (exit_price - entry_price) * quantity - 2.0 * self.commission_per_trade
                         pnl_pct = (exit_price - entry_price) / entry_price

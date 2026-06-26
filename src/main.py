@@ -342,6 +342,18 @@ async def main() -> None:
                 return 0.0
         return 0.0
 
+    def _cancel_resting_stop(trade_memory: dict | None) -> None:
+        # Clear the protective stop order when we close a position by other means,
+        # so it can't fire later against a fresh position in the same symbol.
+        if not trade_memory:
+            return
+        stop_trade = trade_memory.get("stop_order")
+        if stop_trade is not None:
+            try:
+                order_manager.cancel_order(stop_trade)
+            except Exception as exc:
+                logger.warning("Could not cancel resting stop: %s", exc)
+
     async def liquidate_all_positions(reason: str = "Manual") -> List[str]:
         results: List[str] = []
         now = datetime.now(timezone.utc)
@@ -355,6 +367,7 @@ async def main() -> None:
             last_sell_time[symbol_key] = now
 
             trade_memory = open_trade_memory.pop(symbol_key, None)
+            _cancel_resting_stop(trade_memory)
             entry_price = 0.0
             entry_time_mem = None
             if trade_memory:
@@ -531,6 +544,21 @@ async def main() -> None:
 
                     await order_manager.execute_trade(symbol, "BUY", trade_size)
                     last_buy_time[symbol_key] = now
+
+                    # Place a resting 2% stop order at the broker so a fast adverse move
+                    # fills near the stop intrabar — matching the backtest's stop model
+                    # instead of relying on this loop to catch the breach late.
+                    stop_price = round(current_price * 0.98, 2) if current_price > 0.0 else 0.0
+                    stop_trade = None
+                    if stop_price > 0.0:
+                        try:
+                            stop_trade = await order_manager.place_stop_order(
+                                symbol, "SELL", trade_size, stop_price
+                            )
+                            logger.info("Resting stop placed for %s at $%.2f (−2%%).", symbol, stop_price)
+                        except Exception as exc:
+                            logger.warning("Could not place resting stop for %s: %s", symbol, exc)
+
                     open_trade_memory[symbol_key] = {
                         "technical_context": technical_context,
                         "prediction": signal_direction,
@@ -540,6 +568,7 @@ async def main() -> None:
                         "highest_price_seen": current_price,
                         "initial_atr": current_atr,
                         "entry_confidence": confidence,
+                        "stop_order": stop_trade,
                     }
                     stop_loss = current_price * 0.98 if current_price > 0.0 else "N/A"
                     target_price = current_price * 1.04 if current_price > 0.0 else "N/A"
@@ -565,12 +594,16 @@ async def main() -> None:
                         except (TypeError, ValueError):
                             entry_price = 0.0
 
-                    if entry_price > 0.0 and current_price > 0.0:
+                    # Fallback stop only — when no resting broker stop is active (e.g. it
+                    # failed to place). Normally the broker's resting stop handles the 2%
+                    # exit and is reconciled at the top of the polling loop.
+                    has_resting_stop = bool(trade_memory and trade_memory.get("stop_order") is not None)
+                    if entry_price > 0.0 and current_price > 0.0 and not has_resting_stop:
                         loss_pct = ((entry_price - current_price) / entry_price) * 100.0
                         if loss_pct >= 2.0:
                             sell_quantity = max(1, int(abs(holding_quantity)))
                             logger.warning(
-                                "Stop-loss hit: %s | entry $%.2f → now $%.2f (−%.2f%%) | selling %d.",
+                                "Fallback stop-loss: %s | entry $%.2f → now $%.2f (−%.2f%%) | selling %d.",
                                 symbol, entry_price, current_price, loss_pct, sell_quantity,
                             )
 
@@ -616,6 +649,7 @@ async def main() -> None:
                     last_sell_time[symbol_key] = now
 
                     trade_memory = open_trade_memory.pop(symbol_key, None)
+                    _cancel_resting_stop(trade_memory)
                     entry_price_mem = 0.0
                     entry_time_mem = None
                     if trade_memory:
@@ -687,6 +721,52 @@ async def main() -> None:
                     is_holding = holding_quantity != 0.0
                     symbol_key = symbol.upper().strip()
 
+                    # Reconcile broker-side stop fills: if the resting stop order has
+                    # filled, the position is flat but we still hold trade memory. Record
+                    # the close at the actual fill price and clear the slot.
+                    if not is_holding and symbol_key in open_trade_memory:
+                        pending_mem = open_trade_memory.get(symbol_key)
+                        stop_trade = pending_mem.get("stop_order") if pending_mem else None
+                        stop_filled = False
+                        if stop_trade is not None:
+                            try:
+                                stop_filled = getattr(stop_trade.orderStatus, "status", "") == "Filled"
+                            except Exception:
+                                stop_filled = False
+                        if stop_filled:
+                            open_trade_memory.pop(symbol_key, None)
+                            entry_price = float(pending_mem.get("entry_price", 0.0))
+                            entry_time_mem = pending_mem.get("entry_time")
+                            entry_conf = float(pending_mem.get("entry_confidence", 0.0))
+                            closed_qty = max(1, int(pending_mem.get("quantity", 1)))
+                            try:
+                                fill_px = float(getattr(stop_trade.orderStatus, "avgFillPrice", 0.0)) or 0.0
+                            except Exception:
+                                fill_px = 0.0
+                            exit_px = fill_px if fill_px > 0.0 else (entry_price * 0.98 if entry_price > 0.0 else current_price)
+                            last_sell_time[symbol_key] = datetime.now(timezone.utc)
+                            _record_closed_trade(entry_price, exit_px, closed_qty, entry_conf,
+                                                 symbol=symbol, entry_time=entry_time_mem)
+                            outcome = _trade_outcome(entry_price, exit_px)
+                            await news_client.record_trade_memory_async(
+                                symbol=symbol,
+                                technical_context=str(pending_mem.get("technical_context", "")),
+                                prediction=str(pending_mem.get("prediction", "BULLISH")),
+                                outcome=outcome,
+                            )
+                            await discord_ui.send_close_alert(
+                                symbol=symbol,
+                                is_long=True,
+                                entry_price=entry_price,
+                                exit_price=exit_px,
+                                quantity=closed_qty,
+                                entry_time=entry_time_mem,
+                                exit_reason="2% stop-loss (resting order filled)",
+                                market_story=str(pending_mem.get("technical_context", "")),
+                            )
+                            logger.info("Resting stop filled for %s x%d — 2%% stop-loss.", symbol, closed_qty)
+                            continue
+
                     # ATR trailing stop and take-profit (active regardless of time, protect open capital)
                     if is_holding:
                         trade_memory = open_trade_memory.get(symbol_key)
@@ -721,6 +801,7 @@ async def main() -> None:
                                 last_sell_time[symbol_key] = datetime.now(timezone.utc)
 
                                 stopped_trade_memory = open_trade_memory.pop(symbol_key, None)
+                                _cancel_resting_stop(stopped_trade_memory)
                                 entry_time_mem = stopped_trade_memory.get("entry_time") if stopped_trade_memory else None
                                 if stopped_trade_memory:
                                     _record_closed_trade(entry_price, current_price, sell_quantity, entry_conf,
@@ -756,6 +837,7 @@ async def main() -> None:
                                 last_sell_time[symbol_key] = datetime.now(timezone.utc)
 
                                 stopped_trade_memory = open_trade_memory.pop(symbol_key, None)
+                                _cancel_resting_stop(stopped_trade_memory)
                                 entry_time_mem = stopped_trade_memory.get("entry_time") if stopped_trade_memory else None
                                 if stopped_trade_memory:
                                     _record_closed_trade(entry_price, current_price, sell_quantity, entry_conf,
