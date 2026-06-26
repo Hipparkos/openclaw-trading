@@ -219,11 +219,27 @@ async def main() -> None:
     discord_ui.settings = settings
 
     async def _subscribe_if_new(symbol: str) -> None:
-        if symbol not in client.data_buffer:
-            logger.info("Adding ticker from Discord: %s", symbol)
+        symbol = symbol.upper().strip()
+        # Make sure the symbol is on the list the trading loop iterates. Being
+        # data-subscribed alone isn't enough — the loop reads settings["tickers"].
+        watchlist = settings.setdefault("tickers", [])
+        if symbol not in watchlist:
+            watchlist.append(symbol)
+
+        if symbol in client.data_buffer:
+            logger.info("Ticker %s already subscribed; confirmed on the trading list.", symbol)
+            return
+
+        # Runs as a detached task from the Discord command, so swallow nothing —
+        # a silent failure here is exactly why a manually added ticker never starts.
+        try:
+            logger.info("Subscribing market data for %s (added via Discord)...", symbol)
             await client._subscribe_to_ticker(symbol)
-        else:
-            logger.debug("Ticker %s already buffered, skipping re-subscription.", symbol)
+            bars_5m = len(client.data_buffer.get(symbol, {}).get("5 mins", []))
+            bars_1h = len(client.data_buffer.get(symbol, {}).get("1 hour", []))
+            logger.info("%s now monitored — %d 5m / %d 1h bars loaded.", symbol, bars_5m, bars_1h)
+        except Exception as exc:
+            logger.exception("Failed to subscribe %s (added via Discord): %s", symbol, exc)
 
     discord_ui.on_add_ticker = _subscribe_if_new
 
@@ -743,7 +759,10 @@ async def main() -> None:
                     eod_liquidation_done_date = today_et
 
                 scan = {"held": 0, "bull_setup": 0, "hourly_neutral": 0}
-                for symbol in settings["tickers"]:
+                # Snapshot the list so a Discord !add mid-cycle can't disrupt iteration;
+                # the new ticker is simply picked up on the next pass.
+                active_tickers = list(settings["tickers"])
+                for symbol in active_tickers:
                     if settings.get("backtest_mode"):
                         break
                     (technical_context, current_price, current_atr,
@@ -982,7 +1001,7 @@ async def main() -> None:
                 if not settings.get("backtest_mode"):
                     logger.info(
                         "Scan: %d tickers | %d held | %d bullish setups | %d hourly-NEUTRAL (no 1h SMA-50?)",
-                        len(settings["tickers"]), scan["held"], scan["bull_setup"], scan["hourly_neutral"],
+                        len(active_tickers), scan["held"], scan["bull_setup"], scan["hourly_neutral"],
                     )
 
                 # Sleep in 5-second increments so backtest_mode is noticed within 5 s
