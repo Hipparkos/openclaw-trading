@@ -294,6 +294,8 @@ async def main() -> None:
     ATR_TRAIL_MULT = 2.5          # trailing stop = peak − 2.5 × entry-time ATR
     TAKE_PROFIT_ATR_MULT = 3.0    # take-profit = entry + 3.0 × entry-time ATR
     MIN_HOLD_MINUTES = 25         # 5 × 5m bars before take-profit / reversal exits
+    POSITION_PCT = 0.10           # base position = 10% of equity × confidence per trade
+    MAX_GROSS_EXPOSURE_PCT = 0.90 # no new BUYs once open positions ≥ 90% of equity
     eod_recap_sent_date: Optional[date] = None
     eod_liquidation_done_date: Optional[date] = None
 
@@ -574,7 +576,18 @@ async def main() -> None:
                         return
 
                     account_equity = order_manager.get_account_equity()
-                    target_capital = account_equity * 0.015 * confidence if account_equity > 0.0 else 0.0
+
+                    # Gross-exposure cap — don't open new positions once the book is
+                    # already ~fully deployed, so 10% sizing can't over-commit equity.
+                    gross_exposure = order_manager.get_gross_position_value()
+                    if account_equity > 0.0 and gross_exposure >= MAX_GROSS_EXPOSURE_PCT * account_equity:
+                        logger.info(
+                            "%s: BUY skipped — open exposure %.0f%% ≥ %.0f%% cap.",
+                            symbol, (gross_exposure / account_equity) * 100, MAX_GROSS_EXPOSURE_PCT * 100,
+                        )
+                        return
+
+                    target_capital = account_equity * POSITION_PCT * confidence if account_equity > 0.0 else 0.0
                     calculated_shares = (target_capital / current_price) if current_price > 0.0 else 0.0
                     trade_size = max(1, int(calculated_shares))
                     logger.info(

@@ -112,6 +112,17 @@ class OrderManager:
 
         return 0.0
 
+    # Total market value of all open positions (gross exposure) — used to cap
+    # how much of the account can be deployed at once.
+    def get_gross_position_value(self) -> float:
+        total = 0.0
+        for position in self.ib.portfolio():
+            try:
+                total += abs(float(position.marketValue))
+            except (TypeError, ValueError):
+                continue
+        return total
+
     # Convenience market order - quick market submit
     async def place_market_order(self, symbol: str, action: str, quantity: float) -> Any:
         order = MarketOrder(action.upper(), quantity, tif="DAY")

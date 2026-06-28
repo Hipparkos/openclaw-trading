@@ -208,7 +208,7 @@ class BacktestEngine:
     DAILY_LOSS_LIMIT_PCT = 0.005  # halt new entries when day's P&L < -0.5% of equity
     ATR_TRAIL_MULT = 2.5
     TAKE_PROFIT_ATR_MULT = 3.0
-    POSITION_PCT = 0.015
+    POSITION_PCT = 0.10       # base position = 10% of equity × confidence per trade
     MIN_HOLD_BARS = 5         # 25 minutes before AI-reversal exit allowed
     COOLDOWN_BARS = 3         # 15-minute cooldown after close
     LLM_COOLDOWN_BARS = 20    # ~1h40m between fresh LLM calls per symbol
