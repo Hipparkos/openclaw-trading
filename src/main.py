@@ -292,7 +292,9 @@ async def main() -> None:
     # Risk/exit constants — kept identical to BacktestEngine so live mirrors the backtest
     DAILY_LOSS_LIMIT_PCT = 0.005  # halt new entries when day P&L < -0.5% equity
     ATR_TRAIL_MULT = 2.5          # trailing stop = peak − 2.5 × entry-time ATR
-    TAKE_PROFIT_ATR_MULT = 3.0    # take-profit = entry + 3.0 × entry-time ATR
+    TAKE_PROFIT_ATR_MULT = 3.0    # TP1 — first profit at entry + 3.0 × entry-time ATR
+    TAKE_PROFIT_2_ATR_MULT = 6.0  # TP2 — runner target at entry + 6.0 × entry-time ATR
+    SCALE_OUT_PCT = 0.60          # sell 60% at TP1, run the remaining 40%
     MIN_HOLD_MINUTES = 25         # 5 × 5m bars before take-profit / reversal exits
     POSITION_PCT = 0.10           # base position = 10% of equity × confidence per trade
     MAX_GROSS_EXPOSURE_PCT = 0.90 # no new BUYs once open positions ≥ 90% of equity
@@ -627,6 +629,7 @@ async def main() -> None:
                         "initial_atr": current_atr,
                         "entry_confidence": confidence,
                         "stop_order": stop_trade,
+                        "partial_taken": False,
                     }
                     stop_loss = current_price * 0.98 if current_price > 0.0 else "N/A"
                     target_price = current_price * 1.04 if current_price > 0.0 else "N/A"
@@ -810,11 +813,14 @@ async def main() -> None:
                             entry_time_mem = pending_mem.get("entry_time")
                             entry_conf = float(pending_mem.get("entry_confidence", 0.0))
                             closed_qty = max(1, int(pending_mem.get("quantity", 1)))
+                            was_partial = bool(pending_mem.get("partial_taken"))
                             try:
                                 fill_px = float(getattr(stop_trade.orderStatus, "avgFillPrice", 0.0)) or 0.0
                             except Exception:
                                 fill_px = 0.0
-                            exit_px = fill_px if fill_px > 0.0 else (entry_price * 0.98 if entry_price > 0.0 else current_price)
+                            # After TP1 the resting stop sits at breakeven (entry), not −2%.
+                            stop_ref = entry_price if was_partial else entry_price * 0.98
+                            exit_px = fill_px if fill_px > 0.0 else (stop_ref if entry_price > 0.0 else current_price)
                             last_sell_time[symbol_key] = datetime.now(timezone.utc)
                             _record_closed_trade(entry_price, exit_px, closed_qty, entry_conf,
                                                  symbol=symbol, entry_time=entry_time_mem)
@@ -832,10 +838,12 @@ async def main() -> None:
                                 exit_price=exit_px,
                                 quantity=closed_qty,
                                 entry_time=entry_time_mem,
-                                exit_reason="2% stop-loss (resting order filled)",
+                                exit_reason=("Breakeven stop (resting order filled)" if was_partial
+                                             else "2% stop-loss (resting order filled)"),
                                 market_story=str(pending_mem.get("technical_context", "")),
                             )
-                            logger.info("Resting stop filled for %s x%d — 2%% stop-loss.", symbol, closed_qty)
+                            logger.info("Resting stop filled for %s x%d — %s.", symbol, closed_qty,
+                                        "breakeven" if was_partial else "2% stop-loss")
                             continue
 
                     # ATR trailing stop and take-profit (active regardless of time, protect open capital)
@@ -865,7 +873,11 @@ async def main() -> None:
 
                             # Trailing stop anchored to entry-time ATR (not current ATR),
                             # so the distance can't widen mid-trade — mirrors the backtest.
+                            # After the TP1 scale-out the trail is floored at breakeven so
+                            # the runner can never give back into a loss.
                             trailing_stop_level = highest_price_seen - (ATR_TRAIL_MULT * initial_atr)
+                            if trade_memory.get("partial_taken"):
+                                trailing_stop_level = max(trailing_stop_level, entry_price)
                             if initial_atr > 0.0 and current_price > 0.0 and current_price <= trailing_stop_level:
                                 sell_quantity = max(1, int(abs(holding_quantity)))
                                 logger.warning("ATR trailing stop hit: %s.", symbol)
@@ -903,18 +915,61 @@ async def main() -> None:
                                 continue
 
                             # Take-profit, gated by the same 25-min minimum hold as the backtest.
+                            # TP1 (3×ATR) scales out 60% and raises the stop to breakeven;
+                            # TP2 (6×ATR) closes the runner.
                             entry_time_tp = trade_memory.get("entry_time")
                             held_long_enough = (
                                 entry_time_tp is not None
                                 and datetime.now(timezone.utc) - entry_time_tp >= timedelta(minutes=MIN_HOLD_MINUTES)
                             )
-                            take_profit_level = entry_price + (TAKE_PROFIT_ATR_MULT * initial_atr)
+                            partial_taken = bool(trade_memory.get("partial_taken", False))
+                            tp_mult = TAKE_PROFIT_2_ATR_MULT if partial_taken else TAKE_PROFIT_ATR_MULT
+                            take_profit_level = entry_price + (tp_mult * initial_atr)
                             if (held_long_enough and entry_price > 0.0 and initial_atr > 0.0
                                     and current_price >= take_profit_level):
-                                sell_quantity = max(1, int(abs(holding_quantity)))
-                                logger.warning("Take-profit hit: %s.", symbol)
+                                full_qty = max(1, int(abs(holding_quantity)))
+                                scale_qty = int(full_qty * SCALE_OUT_PCT)
 
-                                # Cancel the protective stop before closing so the two can't both fill.
+                                # ── TP1: scale out 60%, keep a runner, stop → breakeven ──
+                                if not partial_taken and scale_qty >= 1 and (full_qty - scale_qty) >= 1:
+                                    remaining = full_qty - scale_qty
+                                    logger.warning("Take-profit 1 hit: %s — scaling out %d/%d.", symbol, scale_qty, full_qty)
+
+                                    await order_manager.execute_trade(symbol, "SELL", scale_qty)
+                                    last_sell_time[symbol_key] = datetime.now(timezone.utc)
+
+                                    # Replace the protective stop with a breakeven stop on the runner.
+                                    _cancel_resting_stop(trade_memory)
+                                    breakeven_stop = None
+                                    try:
+                                        breakeven_stop = await order_manager.place_stop_order(
+                                            symbol, "SELL", remaining, round(entry_price, 2)
+                                        )
+                                    except Exception as exc:
+                                        logger.warning("Could not place breakeven stop for %s: %s", symbol, exc)
+
+                                    trade_memory["partial_taken"] = True
+                                    trade_memory["quantity"] = remaining
+                                    trade_memory["stop_order"] = breakeven_stop
+
+                                    _record_closed_trade(entry_price, current_price, scale_qty, entry_conf,
+                                                         symbol=symbol, entry_time=entry_time_tp)
+                                    await discord_ui.send_close_alert(
+                                        symbol=symbol,
+                                        is_long=holding_quantity > 0,
+                                        entry_price=entry_price,
+                                        exit_price=current_price,
+                                        quantity=scale_qty,
+                                        entry_time=entry_time_tp,
+                                        exit_reason="Partial take-profit (60%) — stop to breakeven",
+                                        market_story=technical_context,
+                                    )
+                                    logger.info("Partial TP: %s sold %d, runner %d on breakeven stop.", symbol, scale_qty, remaining)
+                                    continue
+
+                                # ── TP2 (or position too small to split): close the remainder ──
+                                sell_quantity = full_qty
+                                logger.warning("Take-profit 2 hit: %s — closing runner.", symbol)
                                 stopped_trade_memory = open_trade_memory.pop(symbol_key, None)
                                 _cancel_resting_stop(stopped_trade_memory)
 
@@ -932,18 +987,17 @@ async def main() -> None:
                                         outcome=outcome,
                                     )
 
-                                is_long = holding_quantity > 0
                                 await discord_ui.send_close_alert(
                                     symbol=symbol,
-                                    is_long=is_long,
+                                    is_long=holding_quantity > 0,
                                     entry_price=entry_price,
                                     exit_price=current_price,
                                     quantity=sell_quantity,
                                     entry_time=entry_time_mem,
-                                    exit_reason="Take-profit target met",
+                                    exit_reason="Take-profit target met (runner)",
                                     market_story=technical_context,
                                 )
-                                logger.info("Closed %s x%d — take-profit.", symbol, sell_quantity)
+                                logger.info("Closed %s x%d — take-profit 2.", symbol, sell_quantity)
                                 continue
 
                     # ── Entry / exit decision (mirrors the backtest) ─────────────

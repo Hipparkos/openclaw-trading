@@ -207,7 +207,9 @@ class BacktestEngine:
     STOP_LOSS_PCT = 0.02
     DAILY_LOSS_LIMIT_PCT = 0.005  # halt new entries when day's P&L < -0.5% of equity
     ATR_TRAIL_MULT = 2.5
-    TAKE_PROFIT_ATR_MULT = 3.0
+    TAKE_PROFIT_ATR_MULT = 3.0      # TP1 — first profit at entry + 3×ATR
+    TAKE_PROFIT_2_ATR_MULT = 6.0    # TP2 — runner target at entry + 6×ATR
+    SCALE_OUT_PCT = 0.60            # sell 60% at TP1, run the remaining 40%
     POSITION_PCT = 0.10       # base position = 10% of equity × confidence per trade
     MIN_HOLD_BARS = 5         # 25 minutes before AI-reversal exit allowed
     COOLDOWN_BARS = 3         # 15-minute cooldown after close
@@ -474,6 +476,7 @@ class BacktestEngine:
         entry_bar_idx = -1
         last_exit_bar = -1
         entry_confidence = 0.0
+        partial_taken = False  # True after the 60% scale-out at TP1
 
         # LLM rate-limiting: cache results by context string + one-per-session cooldown
         llm_cache: dict[str, tuple[str, float]] = {}
@@ -523,43 +526,57 @@ class BacktestEngine:
                 bar_high = float(bar.high)
                 bar_low = float(bar.low)
 
-                # 1. Hard stop-loss — modelled as a resting broker stop order, so it
-                #    fills intrabar at the stop level (or at the open if the bar gapped
-                #    through it), NOT at the next bar's open. This caps the realised loss
-                #    near STOP_LOSS_PCT instead of letting a fast bar blow far past it.
+                is_partial = False   # True when this exit is the TP1 60% scale-out
+
+                # 1. Hard stop — a resting broker stop, filled intrabar at the stop level
+                #    (or the open on a gap). Before TP1 it sits at STOP_LOSS_PCT; after the
+                #    scale-out it has been raised to breakeven (entry) so the trade can't
+                #    turn into a loss.
                 if direction == "LONG":
-                    stop_level = entry_price * (1 - self.STOP_LOSS_PCT)
+                    stop_level = entry_price if partial_taken else entry_price * (1 - self.STOP_LOSS_PCT)
                     if bar_low <= stop_level:
-                        exit_reason = "2% stop-loss"
+                        exit_reason = "Breakeven stop" if partial_taken else "2% stop-loss"
                         stop_fill = min(float(bar.open), stop_level)
                 else:
-                    stop_level = entry_price * (1 + self.STOP_LOSS_PCT)
+                    stop_level = entry_price if partial_taken else entry_price * (1 + self.STOP_LOSS_PCT)
                     if bar_high >= stop_level:
-                        exit_reason = "2% stop-loss"
+                        exit_reason = "Breakeven stop" if partial_taken else "2% stop-loss"
                         stop_fill = max(float(bar.open), stop_level)
 
-                # 2. ATR trailing stop (anchored to initial_atr so the stop distance
-                #    doesn't widen during high-volatility moves mid-trade)
+                # 2. ATR trailing stop (anchored to initial_atr). After the scale-out the
+                #    trail is floored at breakeven so the runner can't give back to a loss.
                 if exit_reason is None and initial_atr > 0:
                     if direction == "LONG":
                         if current_price > peak_price:
                             peak_price = current_price
-                        if current_price <= peak_price - self.ATR_TRAIL_MULT * initial_atr:
+                        trail = peak_price - self.ATR_TRAIL_MULT * initial_atr
+                        if partial_taken:
+                            trail = max(trail, entry_price)
+                        if bar_low <= trail:
                             exit_reason = "ATR trailing stop"
+                            stop_fill = min(float(bar.open), trail)
                     else:
                         if current_price < peak_price:
                             peak_price = current_price
-                        if current_price >= peak_price + self.ATR_TRAIL_MULT * initial_atr:
+                        trail = peak_price + self.ATR_TRAIL_MULT * initial_atr
+                        if partial_taken:
+                            trail = min(trail, entry_price)
+                        if bar_high >= trail:
                             exit_reason = "ATR trailing stop"
+                            stop_fill = max(float(bar.open), trail)
 
-                # 3. Take-profit (3× ATR from entry)
+                # 3. Take-profit. TP1 (entry + 3×ATR) scales out SCALE_OUT_PCT and keeps
+                #    the runner; TP2 (entry + 6×ATR) closes the remainder.
                 if exit_reason is None and initial_atr > 0 and bars_held >= self.MIN_HOLD_BARS:
+                    tp_mult = self.TAKE_PROFIT_2_ATR_MULT if partial_taken else self.TAKE_PROFIT_ATR_MULT
                     if direction == "LONG":
-                        if current_price >= entry_price + self.TAKE_PROFIT_ATR_MULT * initial_atr:
+                        if current_price >= entry_price + tp_mult * initial_atr:
                             exit_reason = "Take-profit"
+                            is_partial = not partial_taken
                     else:
-                        if current_price <= entry_price - self.TAKE_PROFIT_ATR_MULT * initial_atr:
+                        if current_price <= entry_price - tp_mult * initial_atr:
                             exit_reason = "Take-profit"
+                            is_partial = not partial_taken
 
                 # 4. Signal reversal (minimum hold period passed)
                 if exit_reason is None and bars_held >= self.MIN_HOLD_BARS:
@@ -573,11 +590,20 @@ class BacktestEngine:
                     # Resting stops fill intrabar at the stop price; signal/TP exits are
                     # decided on the close, so they fill at the next bar's open.
                     exit_price = stop_fill if stop_fill is not None else fill_price
+
+                    # Scale-out: at TP1 sell SCALE_OUT_PCT, keep the rest as a runner with
+                    # the stop raised to breakeven. Needs ≥1 share on each side to split.
+                    scale_qty = int(quantity * self.SCALE_OUT_PCT)
+                    if is_partial and scale_qty >= 1 and (quantity - scale_qty) >= 1:
+                        close_qty = scale_qty
+                    else:
+                        close_qty = quantity   # full close (TP2, stops, reversal, or too small to split)
+
                     if direction == "LONG":
-                        pnl = (exit_price - entry_price) * quantity - 2.0 * self.commission_per_trade
+                        pnl = (exit_price - entry_price) * close_qty - 2.0 * self.commission_per_trade
                         pnl_pct = (exit_price - entry_price) / entry_price
                     else:
-                        pnl = (entry_price - exit_price) * quantity - 2.0 * self.commission_per_trade
+                        pnl = (entry_price - exit_price) * close_qty - 2.0 * self.commission_per_trade
                         pnl_pct = (entry_price - exit_price) / entry_price
 
                     equity += pnl
@@ -591,14 +617,21 @@ class BacktestEngine:
                         exit_time=current_time,
                         entry_price=entry_price,
                         exit_price=exit_price,
-                        quantity=quantity,
+                        quantity=close_qty,
                         pnl=pnl,
                         pnl_pct=pnl_pct,
-                        exit_reason=exit_reason,
+                        exit_reason=("Partial take-profit" if close_qty != quantity else exit_reason),
                         confidence=entry_confidence,
                     ))
-                    in_position = False
-                    last_exit_bar = i
+
+                    if close_qty != quantity:
+                        # Runner stays open: reduce size, raise stop to breakeven.
+                        quantity -= close_qty
+                        partial_taken = True
+                    else:
+                        in_position = False
+                        partial_taken = False
+                        last_exit_bar = i
                     continue
 
             # ── Entry ──
@@ -659,6 +692,7 @@ class BacktestEngine:
                 initial_atr = current_atr
                 entry_bar_idx = i
                 entry_confidence = conf
+                partial_taken = False
                 in_position = True
 
         # Close any position still open at the last available bar
