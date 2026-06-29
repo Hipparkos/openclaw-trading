@@ -479,6 +479,69 @@ class OpenClawDiscord(commands.Bot):
         embed.set_footer(text=f"Limit: {limit_pct * 100:.1f}% × ${equity:,.0f} = ${limit_pct * equity:,.2f}")
         await channel.send(embed=embed)
 
+    @staticmethod
+    def _humanize_context(raw: str) -> str:
+        """Reformat the raw technical-context string into a clean, friendly block for
+        Discord. Display-only — the raw string is unchanged and still feeds the model.
+        Same theme throughout: lowercase label, values separated by ' · ', no 'the',
+        no underscores (RSI_14 → RSI14)."""
+        import re
+        if not raw or not raw.strip():
+            return "no market data yet"
+
+        num = r"(-?\d+(?:\.\d+)?|N/A)"   # number without a trailing sentence period
+        lines: list[str] = []
+
+        def add(label: str, value: str) -> None:
+            if value:
+                lines.append(f"{label:<11}{value}")
+
+        m = re.search(r"Hourly trend is ([A-Z]+)\s*(\([^)]*\))?", raw)
+        if m:
+            add("trend", f"{m.group(1)} {m.group(2) or ''}".strip())
+
+        close = re.search(rf"Close is {num}", raw)
+        sma5 = re.search(rf"SMA_5 is {num}", raw)
+        vwap = re.search(rf"VWAP is {num}", raw)
+        price = []
+        if close:
+            price.append(close.group(1))
+        if sma5:
+            price.append(f"SMA5 {sma5.group(1)}")
+        if vwap:
+            price.append(f"VWAP {vwap.group(1)}")
+        add("price", "  ·  ".join(price))
+
+        rsi = re.search(rf"RSI_14 is {num}", raw)
+        macd = re.search(rf"MACD is {num} and (?:the )?Signal is {num}", raw)
+        mom = []
+        if rsi:
+            mom.append(f"RSI14 {rsi.group(1)}")
+        if macd:
+            mom.append(f"MACD {macd.group(1)} / signal {macd.group(2)}")
+        add("momentum", "  ·  ".join(mom))
+
+        bb = re.search(rf"Bollinger Bands are lower {num} and upper {num}", raw)
+        if bb:
+            add("bands", f"{bb.group(1)} – {bb.group(2)}")
+
+        rg = re.search(r"Regime: ([^|]+)", raw)
+        if rg:
+            reg = rg.group(1).strip().rstrip(".")
+            reg = reg.replace("ADX=", "ADX ").replace(", Volume:", " · volume").replace("Volume:", "volume")
+            add("regime", reg)
+
+        dv = re.search(r"Divergence: RSI=(\w+) MACD=(\w+) strength=([\d.]+)", raw)
+        if dv:
+            add("divergence", f"RSI {dv.group(1)} · MACD {dv.group(2)} (strength {dv.group(3)})")
+
+        if not lines:
+            # Couldn't parse the expected format — light cleanup so we still drop
+            # the 'the' words and underscores rather than show the raw string.
+            cleaned = re.sub(r"\bthe\b ", "", raw, flags=re.IGNORECASE)
+            return cleaned.replace("_", "")
+        return "\n".join(lines)
+
     async def send_trade_signal(self, symbol, market_story, llm_prediction):
         if not self.channel_id:
             logging.error("Trade signal suppressed: Missing target Discord Channel ID configuration.")
@@ -495,7 +558,7 @@ class OpenClawDiscord(commands.Bot):
             color=0x00ff00 if is_bullish else 0xff0000
         )
         embed.add_field(name="Llama 3.2 Prediction", value=f"**{llm_prediction}**", inline=False)
-        embed.add_field(name="The Market Story", value=f"```{market_story}```", inline=False)
+        embed.add_field(name="Market Story", value=f"```{self._humanize_context(market_story)}```", inline=False)
 
         side = "BUY" if is_bullish else "SELL"
         view = TradeApprovalView(self.order_manager, symbol, side)
@@ -586,7 +649,7 @@ class OpenClawDiscord(commands.Bot):
         embed.add_field(name="Exit Trigger", value=exit_reason, inline=True)
         embed.add_field(name="Quantity", value=f"{quantity:,}", inline=True)
         embed.add_field(name="​", value="​", inline=True)
-        embed.add_field(name="Market Context", value=f"```{market_story}```", inline=False)
+        embed.add_field(name="Market Context", value=f"```{self._humanize_context(market_story)}```", inline=False)
 
         await channel.send(embed=embed)
 
@@ -617,7 +680,7 @@ class OpenClawDiscord(commands.Bot):
         embed.add_field(name="Target Price", value=_format_currency(target_price), inline=True)
         embed.add_field(name="Stop Loss", value=_format_currency(stop_loss), inline=True)
         embed.add_field(name="Quantity", value=f"{int(quantity):,}", inline=True)
-        embed.add_field(name="Execution Rationale", value=f"```{market_story}```", inline=False)
+        embed.add_field(name="Execution Rationale", value=f"```{self._humanize_context(market_story)}```", inline=False)
 
         await channel.send(embed=embed)
 
