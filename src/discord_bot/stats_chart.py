@@ -99,14 +99,35 @@ def generate_stats_chart(trades: list[dict], period_label: str,
         return _save(fig)
 
     # ── Top panel: cumulative P&L curve ────────────────────────────────────────
+    # Plotted by TRADE ORDER (not calendar time) so overnight / weekend / closed-
+    # market gaps don't draw a misleading straight line across dead time. Date
+    # ticks are placed at each day's first trade so the timeline is still readable.
     ax1 = fig.add_axes([0.06, 0.45, 0.91, 0.36], facecolor=_PANEL_BG)
-    if exit_times:
-        ax1.plot(exit_times, cum_pnl, color=_TEAL, linewidth=1.6, zorder=3)
+    if cum_pnl:
+        xs = list(range(len(cum_pnl)))
+        ax1.plot(xs, cum_pnl, color=_TEAL, linewidth=1.6, zorder=3)
         fill_col = _GREEN if cum_pnl[-1] >= 0 else _RED
-        ax1.fill_between(exit_times, 0, cum_pnl, alpha=0.13, color=fill_col, zorder=2)
+        ax1.fill_between(xs, 0, cum_pnl, alpha=0.13, color=fill_col, zorder=2)
+        ax1.set_xlim(0, max(len(cum_pnl) - 1, 1))
     ax1.axhline(0, color=_MUTED, linewidth=0.6, linestyle="--", alpha=0.5)
     _style_axis(ax1)
-    ax1.set_xticklabels([])
+
+    # Date ticks at the first trade of each new day (thinned if there are many days).
+    day_pos: list[int] = []
+    day_lab: list[str] = []
+    last_day = None
+    for idx, dt in enumerate(exit_times):
+        key = dt.strftime("%Y-%m-%d")
+        if key != last_day:
+            day_pos.append(idx)
+            day_lab.append(dt.strftime("%b %d"))
+            last_day = key
+    if len(day_pos) > 12:
+        stride = (len(day_pos) // 10) + 1
+        day_pos, day_lab = day_pos[::stride], day_lab[::stride]
+    ax1.set_xticks(day_pos)
+    ax1.set_xticklabels(day_lab, rotation=25, ha="right")
+
     ax1.set_ylabel("Cumulative P&L ($)", color=_MUTED, fontsize=8)
     ax1.yaxis.set_major_formatter(
         plt.FuncFormatter(lambda v, _: f"${v:,.0f}")
