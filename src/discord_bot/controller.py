@@ -43,9 +43,10 @@ class StatsView(discord.ui.View):
         "1 Week": lambda now: now - timedelta(days=7),
     }
 
-    def __init__(self) -> None:
+    def __init__(self, order_manager=None) -> None:
         super().__init__(timeout=300)
         self._db = TradeHistoryDB()
+        self._order_manager = order_manager
         self._current = "YTD"
 
     def _build(self, period: str) -> tuple[discord.Embed, discord.File]:
@@ -59,7 +60,13 @@ class StatsView(discord.ui.View):
             "1 Week": f"{since.strftime('%b %d')} – {now.strftime('%b %d, %Y')}",
         }
         label = f"Performance {period}  ({span[period]})"
-        buf = generate_stats_chart(trades, label)
+        account_equity = 0.0
+        if self._order_manager is not None:
+            try:
+                account_equity = self._order_manager.get_account_equity()
+            except Exception:
+                account_equity = 0.0
+        buf = generate_stats_chart(trades, label, account_equity=account_equity)
 
         file  = discord.File(buf, filename="stats.png")
         embed = discord.Embed(color=0x00D4B8)
@@ -402,7 +409,7 @@ class TradingCommands(commands.Cog):
     @commands.command(name="stats")
     async def stats(self, ctx) -> None:
         """Show YTD/MTD/1-week performance chart with interactive period buttons."""
-        view = StatsView()
+        view = StatsView(self.order_manager)
         try:
             embed, file = await asyncio.to_thread(view._build, "YTD")
         except Exception as exc:
@@ -575,9 +582,14 @@ class OpenClawDiscord(commands.Bot):
         pnl_sign = "+" if net_pnl >= 0 else ""
         color = 0x00FF00 if net_pnl >= 0 else 0xFF0000
 
+        # Net P&L as % growth of the account (vs equity at the start of the day).
+        account_equity = stats.get("account_equity", 0.0)
+        start_equity = account_equity - net_pnl
+        pnl_pct = (net_pnl / start_equity * 100) if start_equity > 0 else 0.0
+
         embed = discord.Embed(title="End of Day Recap", color=color)
 
-        embed.add_field(name="Net P&L", value=f"${pnl_sign}{net_pnl:,.2f}", inline=True)
+        embed.add_field(name="Net P&L", value=f"${pnl_sign}{net_pnl:,.2f} ({pnl_pct:.2f}%)", inline=True)
         embed.add_field(name="Account Liquidity", value=f"${stats.get('account_equity', 0.0):,.2f}", inline=True)
         embed.add_field(name="​", value="​", inline=True)
 

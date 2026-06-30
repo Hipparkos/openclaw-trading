@@ -21,8 +21,13 @@ _GRID     = "#21262d"
 _BORDER   = "#30363d"
 
 
-def generate_stats_chart(trades: list[dict], period_label: str) -> io.BytesIO:
-    """Return a PNG BytesIO of an IBKR-style performance chart."""
+def generate_stats_chart(trades: list[dict], period_label: str,
+                         account_equity: float = 0.0) -> io.BytesIO:
+    """Return a PNG BytesIO of an IBKR-style performance chart.
+
+    account_equity is the current account equity; it's used to express net P&L
+    as a percentage of the equity at the start of the period.
+    """
 
     pnls = [float(t["pnl"]) for t in trades]
     net_pnl   = sum(pnls)
@@ -68,10 +73,15 @@ def generate_stats_chart(trades: list[dict], period_label: str) -> io.BytesIO:
     pnl_color = _GREEN if net_pnl >= 0 else _RED
     pnl_sign  = "+" if net_pnl >= 0 else ""
 
+    # Net P&L as % growth of the account over the period (vs equity at period start).
+    start_equity = account_equity - net_pnl
+    pnl_pct = (net_pnl / start_equity * 100) if start_equity > 0 else 0.0
+    pct_str = f"  ({pnl_pct:.2f}%)" if account_equity > 0 else ""
+
     fig.text(0.03, 0.96, period_label,
              fontsize=14, color=_WHITE, fontweight="bold", va="top")
     fig.text(0.03, 0.91,
-             f"Net P&L  {pnl_sign}${net_pnl:,.2f}",
+             f"Net P&L  {pnl_sign}${net_pnl:,.2f}{pct_str}",
              fontsize=12, color=pnl_color, fontweight="bold", va="top")
     stats_line = (
         f"Trades: {len(pnls)}   "
