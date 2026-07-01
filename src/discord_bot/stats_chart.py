@@ -129,9 +129,7 @@ def generate_stats_chart(trades: list[dict], period_label: str,
     ax1.set_xticklabels(day_lab, rotation=25, ha="right")
 
     ax1.set_ylabel("Cumulative P&L ($)", color=_MUTED, fontsize=8)
-    ax1.yaxis.set_major_formatter(
-        plt.FuncFormatter(lambda v, _: f"${v:,.0f}")
-    )
+    _dollar_axis(ax1)
 
     # ── Bottom panel: daily bars ────────────────────────────────────────────────
     ax2 = fig.add_axes([0.06, 0.11, 0.91, 0.27], facecolor=_PANEL_BG)
@@ -141,23 +139,25 @@ def generate_stats_chart(trades: list[dict], period_label: str,
     ax2.axhline(0, color=_MUTED, linewidth=0.6, linestyle="--", alpha=0.5)
     _style_axis(ax2)
     ax2.set_ylabel("Daily P&L ($)", color=_MUTED, fontsize=8)
-    ax2.yaxis.set_major_formatter(
-        plt.FuncFormatter(lambda v, _: f"${v:,.0f}")
-    )
+    _dollar_axis(ax2)
 
     if day_dates:
         span = (max(day_dates) - min(day_dates)).days
-        if span <= 10:
-            ax2.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
-        elif span <= 35:
-            ax2.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
-            ax2.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=0))
-        else:
+        if span > 35:
             ax2.xaxis.set_major_formatter(mdates.DateFormatter("%b '%y"))
             ax2.xaxis.set_major_locator(mdates.MonthLocator())
+        else:
+            ax2.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
+            if span > 10:
+                ax2.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=0))
         plt.setp(ax2.get_xticklabels(), rotation=25, ha="right")
 
     return _save(fig)
+
+
+def _dollar_axis(ax: plt.Axes) -> None:
+    """Format an axis' y-ticks as whole-dollar amounts."""
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"${v:,.0f}"))
 
 
 def _style_axis(ax: plt.Axes) -> None:

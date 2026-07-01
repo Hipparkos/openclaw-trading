@@ -529,6 +529,43 @@ async def main() -> None:
                 outcome_label = "Win" if pct_change >= 0.0 else "Loss"
                 return f"{pct_change:+.2f}% ({outcome_label})"
 
+            async def _finalize_close(
+                symbol: str,
+                mem: dict | None,
+                entry_price: float,
+                exit_price: float,
+                quantity: int,
+                exit_reason: str,
+                prediction_default: str,
+                is_long: bool,
+                market_story: str,
+            ) -> None:
+                # Shared close tail: record the trade + AI memory (only when we have
+                # the entry memory) and send the Discord close alert. Factored out of
+                # the identical blocks in the stop / trailing / take-profit / reversal /
+                # reconciliation exits.
+                entry_time_mem = mem.get("entry_time") if mem else None
+                if mem:
+                    entry_conf = float(mem.get("entry_confidence", 0.0))
+                    _record_closed_trade(entry_price, exit_price, quantity, entry_conf,
+                                         symbol=symbol, entry_time=entry_time_mem)
+                    await news_client.record_trade_memory_async(
+                        symbol=symbol,
+                        technical_context=str(mem.get("technical_context", market_story)),
+                        prediction=str(mem.get("prediction", prediction_default)),
+                        outcome=_trade_outcome(entry_price, exit_price),
+                    )
+                await discord_ui.send_close_alert(
+                    symbol=symbol,
+                    is_long=is_long,
+                    entry_price=entry_price,
+                    exit_price=exit_price,
+                    quantity=quantity,
+                    entry_time=entry_time_mem,
+                    exit_reason=exit_reason,
+                    market_story=market_story,
+                )
+
             async def _route_trade(
                 symbol: str,
                 signal_direction: str,
@@ -672,29 +709,9 @@ async def main() -> None:
                             last_sell_time[symbol_key] = now
 
                             stopped_trade_memory = open_trade_memory.pop(symbol_key, None)
-                            entry_time_mem = stopped_trade_memory.get("entry_time") if stopped_trade_memory else None
-                            if stopped_trade_memory:
-                                entry_conf = float(stopped_trade_memory.get("entry_confidence", 0.0))
-                                _record_closed_trade(entry_price, current_price, sell_quantity, entry_conf,
-                                                     symbol=symbol, entry_time=entry_time_mem)
-                                outcome = _trade_outcome(entry_price, current_price)
-                                await news_client.record_trade_memory_async(
-                                    symbol=symbol,
-                                    technical_context=str(stopped_trade_memory.get("technical_context", technical_context)),
-                                    prediction=str(stopped_trade_memory.get("prediction", signal_direction)),
-                                    outcome=outcome,
-                                )
-
-                            is_long = holding_quantity > 0
-                            await discord_ui.send_close_alert(
-                                symbol=symbol,
-                                is_long=is_long,
-                                entry_price=entry_price,
-                                exit_price=current_price,
-                                quantity=sell_quantity,
-                                entry_time=entry_time_mem,
-                                exit_reason="2% stop-loss triggered",
-                                market_story=technical_context,
+                            await _finalize_close(
+                                symbol, stopped_trade_memory, entry_price, current_price, sell_quantity,
+                                "2% stop-loss triggered", signal_direction, holding_quantity > 0, technical_context,
                             )
                             logger.info("Closed %s x%d — 2%% stop-loss.", symbol, sell_quantity)
                             return
@@ -712,32 +729,10 @@ async def main() -> None:
 
                     await order_manager.execute_trade(symbol, "SELL", sell_quantity)
                     last_sell_time[symbol_key] = now
-                    entry_price_mem = 0.0
-                    entry_time_mem = None
-                    if trade_memory:
-                        entry_price_mem = float(trade_memory.get("entry_price", 0.0))
-                        entry_time_mem = trade_memory.get("entry_time")
-                        entry_conf = float(trade_memory.get("entry_confidence", 0.0))
-                        _record_closed_trade(entry_price_mem, current_price, sell_quantity, entry_conf,
-                                             symbol=symbol, entry_time=entry_time_mem)
-                        outcome = _trade_outcome(entry_price_mem, current_price)
-                        await news_client.record_trade_memory_async(
-                            symbol=symbol,
-                            technical_context=str(trade_memory.get("technical_context", technical_context)),
-                            prediction=str(trade_memory.get("prediction", signal_direction)),
-                            outcome=outcome,
-                        )
-
-                    is_long = holding_quantity > 0
-                    await discord_ui.send_close_alert(
-                        symbol=symbol,
-                        is_long=is_long,
-                        entry_price=entry_price_mem,
-                        exit_price=current_price,
-                        quantity=sell_quantity,
-                        entry_time=entry_time_mem,
-                        exit_reason="AI bearish signal",
-                        market_story=technical_context,
+                    entry_price_mem = float(trade_memory.get("entry_price", 0.0)) if trade_memory else 0.0
+                    await _finalize_close(
+                        symbol, trade_memory, entry_price_mem, current_price, sell_quantity,
+                        "AI bearish signal", signal_direction, holding_quantity > 0, technical_context,
                     )
                     logger.info("Closed %s x%d — AI bearish signal.", symbol, sell_quantity)
                     return
@@ -822,25 +817,11 @@ async def main() -> None:
                             stop_ref = entry_price if was_partial else entry_price * 0.98
                             exit_px = fill_px if fill_px > 0.0 else (stop_ref if entry_price > 0.0 else current_price)
                             last_sell_time[symbol_key] = datetime.now(timezone.utc)
-                            _record_closed_trade(entry_price, exit_px, closed_qty, entry_conf,
-                                                 symbol=symbol, entry_time=entry_time_mem)
-                            outcome = _trade_outcome(entry_price, exit_px)
-                            await news_client.record_trade_memory_async(
-                                symbol=symbol,
-                                technical_context=str(pending_mem.get("technical_context", "")),
-                                prediction=str(pending_mem.get("prediction", "BULLISH")),
-                                outcome=outcome,
-                            )
-                            await discord_ui.send_close_alert(
-                                symbol=symbol,
-                                is_long=True,
-                                entry_price=entry_price,
-                                exit_price=exit_px,
-                                quantity=closed_qty,
-                                entry_time=entry_time_mem,
-                                exit_reason=("Breakeven stop (resting order filled)" if was_partial
-                                             else "2% stop-loss (resting order filled)"),
-                                market_story=str(pending_mem.get("technical_context", "")),
+                            await _finalize_close(
+                                symbol, pending_mem, entry_price, exit_px, closed_qty,
+                                ("Breakeven stop (resting order filled)" if was_partial
+                                 else "2% stop-loss (resting order filled)"),
+                                "BULLISH", True, str(pending_mem.get("technical_context", "")),
                             )
                             logger.info("Resting stop filled for %s x%d — %s.", symbol, closed_qty,
                                         "breakeven" if was_partial else "2% stop-loss")
@@ -888,28 +869,9 @@ async def main() -> None:
 
                                 await order_manager.execute_trade(symbol, "SELL", sell_quantity)
                                 last_sell_time[symbol_key] = datetime.now(timezone.utc)
-                                entry_time_mem = stopped_trade_memory.get("entry_time") if stopped_trade_memory else None
-                                if stopped_trade_memory:
-                                    _record_closed_trade(entry_price, current_price, sell_quantity, entry_conf,
-                                                         symbol=symbol, entry_time=entry_time_mem)
-                                    outcome = _trade_outcome(entry_price, current_price)
-                                    await news_client.record_trade_memory_async(
-                                        symbol=symbol,
-                                        technical_context=str(stopped_trade_memory.get("technical_context", technical_context)),
-                                        prediction=str(stopped_trade_memory.get("prediction", "BULLISH")),
-                                        outcome=outcome,
-                                    )
-
-                                is_long = holding_quantity > 0
-                                await discord_ui.send_close_alert(
-                                    symbol=symbol,
-                                    is_long=is_long,
-                                    entry_price=entry_price,
-                                    exit_price=current_price,
-                                    quantity=sell_quantity,
-                                    entry_time=entry_time_mem,
-                                    exit_reason="ATR trailing stop",
-                                    market_story=technical_context,
+                                await _finalize_close(
+                                    symbol, stopped_trade_memory, entry_price, current_price, sell_quantity,
+                                    "ATR trailing stop", "BULLISH", holding_quantity > 0, technical_context,
                                 )
                                 logger.info("Closed %s x%d — ATR trailing stop.", symbol, sell_quantity)
                                 continue
@@ -975,27 +937,9 @@ async def main() -> None:
 
                                 await order_manager.execute_trade(symbol, "SELL", sell_quantity)
                                 last_sell_time[symbol_key] = datetime.now(timezone.utc)
-                                entry_time_mem = stopped_trade_memory.get("entry_time") if stopped_trade_memory else None
-                                if stopped_trade_memory:
-                                    _record_closed_trade(entry_price, current_price, sell_quantity, entry_conf,
-                                                         symbol=symbol, entry_time=entry_time_mem)
-                                    outcome = _trade_outcome(entry_price, current_price)
-                                    await news_client.record_trade_memory_async(
-                                        symbol=symbol,
-                                        technical_context=str(stopped_trade_memory.get("technical_context", technical_context)),
-                                        prediction=str(stopped_trade_memory.get("prediction", "BULLISH")),
-                                        outcome=outcome,
-                                    )
-
-                                await discord_ui.send_close_alert(
-                                    symbol=symbol,
-                                    is_long=holding_quantity > 0,
-                                    entry_price=entry_price,
-                                    exit_price=current_price,
-                                    quantity=sell_quantity,
-                                    entry_time=entry_time_mem,
-                                    exit_reason="Take-profit target met (runner)",
-                                    market_story=technical_context,
+                                await _finalize_close(
+                                    symbol, stopped_trade_memory, entry_price, current_price, sell_quantity,
+                                    "Take-profit target met (runner)", "BULLISH", holding_quantity > 0, technical_context,
                                 )
                                 logger.info("Closed %s x%d — take-profit 2.", symbol, sell_quantity)
                                 continue

@@ -31,10 +31,9 @@ class IBKRClient:
         self.max_retries = 30
         self.retry_delay = 7
         self._subscriptions: List[Any] = []
-        
+
         self.ib.disconnectedEvent += self._on_disconnected
         self.ib.errorEvent += self._on_error
-        self._subscriptions: List[Any] = []
         self._is_reconnecting = False
 
     # Handle IBKR errors
