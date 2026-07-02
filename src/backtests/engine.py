@@ -57,6 +57,9 @@ class TradeRecord:
     pnl_pct: float
     exit_reason: str
     confidence: float       # fraction of indicators aligned at entry
+    # Market conditions captured at entry — used by tail forensics to compare
+    # what the worst 5% and best 5% of trades had in common.
+    entry_conditions: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -311,6 +314,89 @@ class BacktestEngine:
             warmup_bars=self.WARMUP_BARS,
         )
 
+    def _capture_entry_conditions(
+        self,
+        cached_df,
+        bar_et,
+        fill_price: float,
+        atr: float,
+        source: str,
+    ) -> dict:
+        """Snapshot the market conditions at entry for tail forensics."""
+        cond: dict = {
+            "atr_pct": round(atr / fill_price * 100, 3) if fill_price > 0 else 0.0,
+            "hour_et": f"{bar_et.hour:02d}:{bar_et.minute:02d}",
+            "source": source,
+            "adx": None,
+            "vol_ratio": None,
+            "max_bar_range_atr": None,   # biggest single-bar range of last 12 bars vs ATR
+        }
+        if cached_df is None or cached_df.empty:
+            return cond
+        row = cached_df.iloc[-1]
+
+        adx_col = next((c for c in cached_df.columns if c.startswith("ADX_")), None)
+        if adx_col is not None:
+            v = row.get(adx_col)
+            if v is not None and not (isinstance(v, float) and math.isnan(v)):
+                cond["adx"] = round(float(v), 1)
+
+        vol, vsma = row.get("volume"), row.get("volume_sma_20")
+        try:
+            if vol is not None and vsma is not None and float(vsma) > 0:
+                cond["vol_ratio"] = round(float(vol) / float(vsma), 2)
+        except (TypeError, ValueError):
+            pass
+
+        if atr > 0 and {"high", "low"}.issubset(cached_df.columns):
+            recent = cached_df.iloc[-12:]
+            try:
+                max_range = float((recent["high"] - recent["low"]).max())
+                cond["max_bar_range_atr"] = round(max_range / atr, 2)
+            except (TypeError, ValueError):
+                pass
+        return cond
+
+    @staticmethod
+    def _avg(values: list) -> float | None:
+        vals = [v for v in values if v is not None]
+        return round(sum(vals) / len(vals), 2) if vals else None
+
+    def _log_tail_forensics(self, trades: list[TradeRecord]) -> None:
+        """Compare entry conditions of the worst 5% vs best 5% of trades by P&L.
+        A condition only matters as a filter when it differs between the tails —
+        common to both just means 'the stock was moving'."""
+        n = len(trades)
+        if n < 20:
+            return
+        by_pnl = sorted(trades, key=lambda t: t.pnl)
+        k = max(3, int(n * 0.05))
+        tails = {"WORST": by_pnl[:k], "BEST": by_pnl[-k:][::-1]}
+
+        for label, group in tails.items():
+            conds = [t.entry_conditions for t in group if t.entry_conditions]
+            llm_share = sum(1 for c in conds if c.get("source") == "llm")
+            self.logger.info(
+                "Forensics %s %d: avg P&L $%.0f | ATR%%=%s | ADX=%s | vol=%sx | "
+                "max_bar/ATR=%s | conf=%.2f | llm=%d/%d",
+                label, k,
+                sum(t.pnl for t in group) / k,
+                self._avg([c.get("atr_pct") for c in conds]),
+                self._avg([c.get("adx") for c in conds]),
+                self._avg([c.get("vol_ratio") for c in conds]),
+                self._avg([c.get("max_bar_range_atr") for c in conds]),
+                sum(t.confidence for t in group) / k,
+                llm_share, len(conds),
+            )
+            for t in group:
+                c = t.entry_conditions or {}
+                self.logger.info(
+                    "  %s %s $%+.0f (%s) | entry %s ET | ATR%%=%s ADX=%s vol=%sx range=%s src=%s",
+                    label.lower(), t.symbol, t.pnl, t.exit_reason,
+                    c.get("hour_et", "?"), c.get("atr_pct"), c.get("adx"),
+                    c.get("vol_ratio"), c.get("max_bar_range_atr"), c.get("source", "?"),
+                )
+
     # ── LLM evaluation ─────────────────────────────────────────────────────────
 
     def _build_technical_context(self, cached_df, df_1h=None) -> str:
@@ -477,6 +563,7 @@ class BacktestEngine:
         last_exit_bar = -1
         entry_confidence = 0.0
         partial_taken = False  # True after the 60% scale-out at TP1
+        entry_snapshot: dict = {}  # entry conditions for tail forensics
 
         # LLM rate-limiting: cache results by context string + one-per-session cooldown
         llm_cache: dict[str, tuple[str, float]] = {}
@@ -622,6 +709,7 @@ class BacktestEngine:
                         pnl_pct=pnl_pct,
                         exit_reason=("Partial take-profit" if close_qty != quantity else exit_reason),
                         confidence=entry_confidence,
+                        entry_conditions=entry_snapshot,
                     ))
 
                     if close_qty != quantity:
@@ -693,6 +781,10 @@ class BacktestEngine:
                 entry_bar_idx = i
                 entry_confidence = conf
                 partial_taken = False
+                entry_snapshot = self._capture_entry_conditions(
+                    cached_df, bar_et, fill_price, current_atr,
+                    source="llm" if llm_sig != "NEUTRAL" else "technical",
+                )
                 in_position = True
 
         # Close any position still open at the last available bar
@@ -721,6 +813,7 @@ class BacktestEngine:
                 pnl_pct=pnl_pct,
                 exit_reason="End-of-backtest close",
                 confidence=entry_confidence,
+                entry_conditions=entry_snapshot,
             ))
 
         return trades, equity, signals_attempted
@@ -813,6 +906,8 @@ class BacktestEngine:
         result.trades = all_trades
         result.finalise()
         result.total_commissions = 2.0 * self.commission_per_trade * result.total_trades
+
+        self._log_tail_forensics(all_trades)
 
         self.logger.info(
             "Backtest complete — %d trades, %.2f%% return, Sharpe %.2f, max DD %.2f%%.",
