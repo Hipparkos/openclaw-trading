@@ -399,6 +399,20 @@ class NewsClient:
 
         return self._neutral_openclaw_prediction()
 
+    async def evaluate_setup(self, symbol: str, technical_context: str) -> dict[str, Any]:
+        """LLM verdict on a technical setup when no headlines are available.
+        Uses the same 'Not provided' headline convention the models were trained
+        with, so the LLM can decide every entry even for news-quiet tickers."""
+        # ~2 LLM calls (openclaw + qwen) at ~25s each on CPU
+        timeout = aiohttp.ClientTimeout(total=120, connect=10, sock_read=90)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            return await self.get_openclaw_prediction(
+                session=session,
+                ticker=symbol,
+                technical_context=technical_context,
+                headline="Not provided",
+            )
+
     @staticmethod
     def _first_nonempty_text(item: dict[str, Any], keys: tuple[str, ...]) -> str:
         nested_content = item.get("content")

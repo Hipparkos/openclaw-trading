@@ -992,19 +992,22 @@ async def main() -> None:
                             llm_conf = abs(score)
                             llm_dir = "BULLISH" if score > 0 else "BEARISH"
 
-                    # Flat with a bullish technical setup. Resolve the final signal the
-                    # same way the backtest does: the news/LLM decides when it has an
-                    # opinion (≥0.60); otherwise fall back to the technical vote (≥0.55).
-                    if llm_dir != "NEUTRAL":
-                        final_dir, final_conf, min_conf = llm_dir, llm_conf, 0.60
-                    else:
-                        final_dir, final_conf, min_conf = tech_dir, tech_conf, 0.55
+                    # No headlines → the LLM still evaluates the bare technical setup
+                    # (same "Not provided" convention it was trained on), so the LLM
+                    # rules on every entry even for news-quiet tickers.
+                    if not news_items:
+                        prediction = await news_client.evaluate_setup(symbol, technical_context)
+                        llm_dir = str(prediction.get("direction", "NEUTRAL")).upper()
+                        llm_conf = float(prediction.get("confidence", 0.0))
 
-                    if final_dir != "BULLISH":
-                        logger.info("%s: entry skipped — news vetoed setup (verdict %s).", symbol, final_dir)
+                    # The LLM is the decision maker — no technical-fallback entries.
+                    # Technicals qualify the candidate; only a confident BULLISH
+                    # verdict from the LLM opens a position (mirrors the backtest).
+                    if llm_dir != "BULLISH":
+                        logger.info("%s: entry skipped — LLM verdict %s.", symbol, llm_dir)
                         continue
-                    if final_conf < min_conf:
-                        logger.info("%s: entry skipped — confidence %.2f < %.2f.", symbol, final_conf, min_conf)
+                    if llm_conf < 0.60:
+                        logger.info("%s: entry skipped — LLM confidence %.2f < 0.60.", symbol, llm_conf)
                         continue
 
                     await _route_trade(
@@ -1013,7 +1016,7 @@ async def main() -> None:
                         technical_context=technical_context,
                         current_price=current_price,
                         current_atr=current_atr,
-                        confidence=final_conf,
+                        confidence=llm_conf,
                     )
 
                 if not settings.get("backtest_mode"):

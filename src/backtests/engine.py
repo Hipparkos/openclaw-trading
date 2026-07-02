@@ -216,7 +216,6 @@ class BacktestEngine:
     POSITION_PCT = 0.10       # base position = 10% of equity × confidence per trade
     MIN_HOLD_BARS = 5         # 25 minutes before AI-reversal exit allowed
     COOLDOWN_BARS = 3         # 15-minute cooldown after close
-    LLM_COOLDOWN_BARS = 20    # ~1h40m between fresh LLM calls per symbol
     MAX_LOOKBACK_5M = 200     # rolling window for indicator computation
     IBKR_TIMEFRAME_PAUSE = 5.0   # seconds between bar-size requests for same symbol
     IBKR_SYMBOL_PAUSE = 12.0     # seconds between symbols — avoids pacing with live subs
@@ -565,9 +564,8 @@ class BacktestEngine:
         partial_taken = False  # True after the 60% scale-out at TP1
         entry_snapshot: dict = {}  # entry conditions for tail forensics
 
-        # LLM rate-limiting: cache results by context string + one-per-session cooldown
+        # LLM result cache — avoids duplicate calls for identical context strings
         llm_cache: dict[str, tuple[str, float]] = {}
-        last_llm_bar = -self.LLM_COOLDOWN_BARS
 
         # Pre-compute full indicator DataFrames once — sliced per bar, no per-bar recalculation
         full_df_5m = self._calc.calculate_all(bars_5m) if bars_5m else pd.DataFrame()
@@ -762,34 +760,20 @@ class BacktestEngine:
                     continue
                 signals_attempted += 1
 
-                # LLM confirmation: cached result → cooldown fresh call → else skip to deterministic
+                # The LLM decides every entry: technicals only qualify the candidate.
+                # Cached result for an identical context, otherwise a fresh call.
                 tech_ctx = self._build_technical_context(cached_df, df_1h=df_1h_slice)
                 if tech_ctx in llm_cache:
                     llm_sig, llm_conf = llm_cache[tech_ctx]
-                elif (i - last_llm_bar) >= self.LLM_COOLDOWN_BARS:
+                else:
                     llm_sig, llm_conf = await self._llm_evaluate(symbol, tech_ctx)
                     llm_cache[tech_ctx] = (llm_sig, llm_conf)
-                    last_llm_bar = i
-                else:
-                    llm_sig, llm_conf = "NEUTRAL", 0.0
 
-                # Resolve the effective signal and confidence
-                if llm_sig != "NEUTRAL":
-                    sig, conf = llm_sig, llm_conf
-                else:
-                    sig, conf = sig_det, conf_det
-
-                if llm_sig != "NEUTRAL":
-                    if conf < 0.60:
-                        continue
-                else:
-                    if conf < 0.55:
-                        continue
-
-                # LLM can veto (BEARISH/NEUTRAL flip) — enter only on a final BULLISH,
-                # exactly like live. Live never opens shorts.
-                if sig != "BULLISH":
+                # No technical-fallback entries — a NEUTRAL/BEARISH or low-confidence
+                # LLM verdict means no trade, exactly like live.
+                if llm_sig != "BULLISH" or llm_conf < 0.60:
                     continue
+                conf = llm_conf
 
                 qty = max(1, int((equity * self.POSITION_PCT * conf) / fill_price))
                 direction = "LONG"
@@ -802,8 +786,7 @@ class BacktestEngine:
                 entry_confidence = conf
                 partial_taken = False
                 entry_snapshot = self._capture_entry_conditions(
-                    cached_df, bar_et, fill_price, current_atr,
-                    source="llm" if llm_sig != "NEUTRAL" else "technical",
+                    cached_df, bar_et, fill_price, current_atr, source="llm",
                 )
                 in_position = True
 
