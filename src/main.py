@@ -598,6 +598,13 @@ async def main() -> None:
                         logger.info("%s: BUY skipped (opening 30-min filter).", symbol)
                         return
 
+                    # No new entries in the pre-close window (15:50+) — everything is
+                    # liquidated at 15:50, so a late entry would ride into the close
+                    # or hold overnight. Mirrors the backtest.
+                    if _is_pre_close():
+                        logger.info("%s: BUY skipped (pre-close window).", symbol)
+                        return
+
                     last_buy = last_buy_time.get(symbol_key)
                     last_sell = last_sell_time.get(symbol_key)
 

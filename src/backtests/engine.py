@@ -583,6 +583,10 @@ class BacktestEngine:
             current_price = float(bar.close)
             current_time = _to_utc(bar.timestamp)
             fill_price = float(bars_5m[i + 1].open)
+            bar_et = current_time.astimezone(ZoneInfo("America/New_York"))
+            # Live liquidates everything at 15:50 ET and never holds overnight —
+            # mirror that so overnight gaps can't appear in backtest results.
+            in_pre_close = bar_et.hour == 15 and bar_et.minute >= 50
 
             # Rolling windows — no future bars (list used only for length checks)
             window_5m = bars_5m[max(0, i - self.MAX_LOOKBACK_5M + 1): i + 1]
@@ -615,20 +619,26 @@ class BacktestEngine:
 
                 is_partial = False   # True when this exit is the TP1 60% scale-out
 
+                # 0. End-of-day liquidation (15:50 ET) — live force-flattens all
+                #    positions pre-close and never holds overnight.
+                if in_pre_close:
+                    exit_reason = "End-of-day liquidation"
+
                 # 1. Hard stop — a resting broker stop, filled intrabar at the stop level
                 #    (or the open on a gap). Before TP1 it sits at STOP_LOSS_PCT; after the
                 #    scale-out it has been raised to breakeven (entry) so the trade can't
                 #    turn into a loss.
-                if direction == "LONG":
-                    stop_level = entry_price if partial_taken else entry_price * (1 - self.STOP_LOSS_PCT)
-                    if bar_low <= stop_level:
-                        exit_reason = "Breakeven stop" if partial_taken else "2% stop-loss"
-                        stop_fill = min(float(bar.open), stop_level)
-                else:
-                    stop_level = entry_price if partial_taken else entry_price * (1 + self.STOP_LOSS_PCT)
-                    if bar_high >= stop_level:
-                        exit_reason = "Breakeven stop" if partial_taken else "2% stop-loss"
-                        stop_fill = max(float(bar.open), stop_level)
+                if exit_reason is None:
+                    if direction == "LONG":
+                        stop_level = entry_price if partial_taken else entry_price * (1 - self.STOP_LOSS_PCT)
+                        if bar_low <= stop_level:
+                            exit_reason = "Breakeven stop" if partial_taken else "2% stop-loss"
+                            stop_fill = min(float(bar.open), stop_level)
+                    else:
+                        stop_level = entry_price if partial_taken else entry_price * (1 + self.STOP_LOSS_PCT)
+                        if bar_high >= stop_level:
+                            exit_reason = "Breakeven stop" if partial_taken else "2% stop-loss"
+                            stop_fill = max(float(bar.open), stop_level)
 
                 # 2. ATR trailing stop (anchored to initial_atr). After the scale-out the
                 #    trail is floored at breakeven so the runner can't give back to a loss.
@@ -730,8 +740,11 @@ class BacktestEngine:
 
                 # Opening 30-minute noise filter (9:30–10:00 ET)
                 # IBKR RTH data starts at 9:30, so hour==9 covers the full noisy opening window
-                bar_et = current_time.astimezone(ZoneInfo("America/New_York"))
                 if bar_et.hour == 9:
+                    continue
+
+                # No new entries in the pre-close window — live liquidates at 15:50.
+                if in_pre_close:
                     continue
 
                 # Daily drawdown circuit breaker — halt new entries once the shared
@@ -743,7 +756,9 @@ class BacktestEngine:
 
                 # Pre-filter: fast indicator vote — avoids LLM call on bars with no activity
                 sig_det, conf_det = self._compute_signal(window_5m, window_1h, cached_df=cached_df, cached_df_1h=df_1h_slice)
-                if sig_det == "NEUTRAL":
+                # Live is long-only: the LLM/news step only runs on BULLISH technical
+                # setups, so mirror that here (BEARISH setups are never entered).
+                if sig_det != "BULLISH":
                     continue
                 signals_attempted += 1
 
@@ -771,8 +786,13 @@ class BacktestEngine:
                     if conf < 0.55:
                         continue
 
+                # LLM can veto (BEARISH/NEUTRAL flip) — enter only on a final BULLISH,
+                # exactly like live. Live never opens shorts.
+                if sig != "BULLISH":
+                    continue
+
                 qty = max(1, int((equity * self.POSITION_PCT * conf) / fill_price))
-                direction = "LONG" if sig == "BULLISH" else "SHORT"
+                direction = "LONG"
                 entry_price = fill_price
                 entry_time = current_time
                 quantity = qty
