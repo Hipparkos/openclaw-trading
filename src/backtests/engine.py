@@ -214,6 +214,7 @@ class BacktestEngine:
     TAKE_PROFIT_2_ATR_MULT = 6.0    # TP2 — runner target at entry + 6×ATR
     SCALE_OUT_PCT = 0.60            # sell 60% at TP1, run the remaining 40%
     POSITION_PCT = 0.10       # base position = 10% of equity × confidence per trade
+    LLM_CONF_THRESHOLD = 0.60 # min LLM confidence to open a trade
     MIN_HOLD_BARS = 5         # 25 minutes before AI-reversal exit allowed
     COOLDOWN_BARS = 3         # 15-minute cooldown after close
     MAX_LOOKBACK_5M = 200     # rolling window for indicator computation
@@ -566,6 +567,8 @@ class BacktestEngine:
 
         # LLM result cache — avoids duplicate calls for identical context strings
         llm_cache: dict[str, tuple[str, float]] = {}
+        # Verdict tally — shows why the LLM rejected candidates (pick the right lever)
+        llm_verdicts = {"pass": 0, "bull_low": 0, "neutral": 0, "bearish": 0}
 
         # Pre-compute full indicator DataFrames once — sliced per bar, no per-bar recalculation
         full_df_5m = self._calc.calculate_all(bars_5m) if bars_5m else pd.DataFrame()
@@ -769,9 +772,21 @@ class BacktestEngine:
                     llm_sig, llm_conf = await self._llm_evaluate(symbol, tech_ctx)
                     llm_cache[tech_ctx] = (llm_sig, llm_conf)
 
+                # Tally the verdict so we can see *why* candidates are rejected:
+                # low-confidence bullish (→ lower the gate) vs neutral/bearish
+                # (→ the model itself is conservative; retrain).
+                if llm_sig == "BULLISH" and llm_conf >= self.LLM_CONF_THRESHOLD:
+                    llm_verdicts["pass"] += 1
+                elif llm_sig == "BULLISH":
+                    llm_verdicts["bull_low"] += 1
+                elif llm_sig == "BEARISH":
+                    llm_verdicts["bearish"] += 1
+                else:
+                    llm_verdicts["neutral"] += 1
+
                 # No technical-fallback entries — a NEUTRAL/BEARISH or low-confidence
                 # LLM verdict means no trade, exactly like live.
-                if llm_sig != "BULLISH" or llm_conf < 0.60:
+                if llm_sig != "BULLISH" or llm_conf < self.LLM_CONF_THRESHOLD:
                     continue
                 conf = llm_conf
 
@@ -818,6 +833,13 @@ class BacktestEngine:
                 confidence=entry_confidence,
                 entry_conditions=entry_snapshot,
             ))
+
+        v = llm_verdicts
+        evaluated = v["pass"] + v["bull_low"] + v["neutral"] + v["bearish"]
+        self.logger.info(
+            "%s LLM verdicts on %d candidates | passed=%d | bullish<%.2f=%d | neutral=%d | bearish=%d",
+            symbol, evaluated, v["pass"], self.LLM_CONF_THRESHOLD, v["bull_low"], v["neutral"], v["bearish"],
+        )
 
         return trades, equity, signals_attempted
 
