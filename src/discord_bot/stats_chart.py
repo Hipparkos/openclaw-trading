@@ -6,6 +6,9 @@ from datetime import datetime, timezone
 
 import matplotlib
 matplotlib.use("Agg")
+# Render "$" literally — don't let matplotlib parse $...$ as math mode, which
+# italicised the text between two dollar signs and swallowed the "$" characters.
+matplotlib.rcParams["text.parse_math"] = False
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
@@ -87,7 +90,7 @@ def generate_stats_chart(trades: list[dict], period_label: str,
         f"Trades: {len(pnls)}   "
         f"Win Rate: {win_rate:.1f}%   "
         f"Avg Win: +${avg_win:,.2f}   "
-        f"Avg Loss: -${avg_loss:,.2f}   "
+        f"Avg Loss: -${abs(avg_loss):,.2f}   "
         f"Profit Factor: {profit_factor:.2f}"
     )
     fig.text(0.03, 0.87, stats_line,
