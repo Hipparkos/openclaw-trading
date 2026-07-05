@@ -87,7 +87,7 @@ def generate_stats_chart(trades: list[dict], period_label: str,
         f"Trades: {len(pnls)}   "
         f"Win Rate: {win_rate:.1f}%   "
         f"Avg Win: +${avg_win:,.2f}   "
-        f"Avg Loss: -${abs(avg_loss):,.2f}   "
+        f"Avg Loss: -${avg_loss:,.2f}   "
         f"Profit Factor: {profit_factor:.2f}"
     )
     fig.text(0.03, 0.87, stats_line,
