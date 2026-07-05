@@ -514,6 +514,7 @@ class BacktestEngine:
             self.logger.debug(
                 "Primary (openclaw) %s → %s %.2f", symbol, primary_dir, primary_conf,
             )
+            self._openclaw_tally[primary_dir] = self._openclaw_tally.get(primary_dir, 0) + 1
 
             if primary_dir == "NEUTRAL":
                 return "NEUTRAL", 0.0
@@ -530,6 +531,7 @@ class BacktestEngine:
             self.logger.debug(
                 "Reviewer (qwen) %s → %s %.2f", symbol, final_dir, final_conf,
             )
+            self._qwen_tally[final_dir] = self._qwen_tally.get(final_dir, 0) + 1
             return final_dir, final_conf
 
     # ── Symbol replay ──────────────────────────────────────────────────────────
@@ -569,6 +571,10 @@ class BacktestEngine:
         llm_cache: dict[str, tuple[str, float]] = {}
         # Verdict tally — shows why the LLM rejected candidates (pick the right lever)
         llm_verdicts = {"pass": 0, "bull_low": 0, "neutral": 0, "bearish": 0}
+        # Per-model tallies — separate openclaw's raw verdict from qwen's veto, so we
+        # can tell WHICH model is the wall (openclaw only calls qwen on non-NEUTRAL).
+        self._openclaw_tally: dict[str, int] = {}
+        self._qwen_tally: dict[str, int] = {}
 
         # Pre-compute full indicator DataFrames once — sliced per bar, no per-bar recalculation
         full_df_5m = self._calc.calculate_all(bars_5m) if bars_5m else pd.DataFrame()
@@ -839,6 +845,13 @@ class BacktestEngine:
         self.logger.info(
             "%s LLM verdicts on %d candidates | passed=%d | bullish<%.2f=%d | neutral=%d | bearish=%d",
             symbol, evaluated, v["pass"], self.LLM_CONF_THRESHOLD, v["bull_low"], v["neutral"], v["bearish"],
+        )
+        oc, qw = self._openclaw_tally, self._qwen_tally
+        self.logger.info(
+            "%s openclaw verdicts | BULLISH=%d | BEARISH=%d | NEUTRAL=%d  →  qwen review of the "
+            "non-neutral | BULLISH=%d | BEARISH=%d | NEUTRAL=%d",
+            symbol, oc.get("BULLISH", 0), oc.get("BEARISH", 0), oc.get("NEUTRAL", 0),
+            qw.get("BULLISH", 0), qw.get("BEARISH", 0), qw.get("NEUTRAL", 0),
         )
 
         return trades, equity, signals_attempted
