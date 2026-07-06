@@ -297,6 +297,7 @@ async def main() -> None:
     SCALE_OUT_PCT = 0.60          # sell 60% at TP1, run the remaining 40%
     MIN_HOLD_MINUTES = 25         # 5 × 5m bars before take-profit / reversal exits
     POSITION_PCT = 0.10           # base position = 10% of equity × confidence per trade
+    LLM_CONF_THRESHOLD = 0.70     # min LLM confidence to open a trade
     MAX_GROSS_EXPOSURE_PCT = 0.90 # no new BUYs once open positions ≥ 90% of equity
     eod_recap_sent_date: Optional[date] = None
     eod_liquidation_done_date: Optional[date] = None
@@ -1006,8 +1007,9 @@ async def main() -> None:
                     if llm_dir != "BULLISH":
                         logger.info("%s: entry skipped — LLM verdict %s.", symbol, llm_dir)
                         continue
-                    if llm_conf < 0.60:
-                        logger.info("%s: entry skipped — LLM confidence %.2f < 0.60.", symbol, llm_conf)
+                    if llm_conf < LLM_CONF_THRESHOLD:
+                        logger.info("%s: entry skipped — LLM confidence %.2f < %.2f.",
+                                    symbol, llm_conf, LLM_CONF_THRESHOLD)
                         continue
 
                     await _route_trade(

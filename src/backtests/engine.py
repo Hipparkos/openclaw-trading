@@ -214,7 +214,7 @@ class BacktestEngine:
     TAKE_PROFIT_2_ATR_MULT = 6.0    # TP2 — runner target at entry + 6×ATR
     SCALE_OUT_PCT = 0.60            # sell 60% at TP1, run the remaining 40%
     POSITION_PCT = 0.10       # base position = 10% of equity × confidence per trade
-    LLM_CONF_THRESHOLD = 0.60 # min LLM confidence to open a trade
+    LLM_CONF_THRESHOLD = 0.70 # min LLM confidence to open a trade
     MIN_HOLD_BARS = 5         # 25 minutes before AI-reversal exit allowed
     COOLDOWN_BARS = 3         # 15-minute cooldown after close
     MAX_LOOKBACK_5M = 200     # rolling window for indicator computation
