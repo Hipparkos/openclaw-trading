@@ -505,7 +505,9 @@ class BacktestEngine:
         Qwen is only invoked when openclaw returns a non-NEUTRAL signal,
         keeping inference overhead low on quiet bars.
         """
-        timeout = aiohttp.ClientTimeout(total=90, connect=10, sock_read=80)
+        # Generous read timeout — on a CPU-only VM a queued qwen call can exceed a
+        # short window; wait it out (matches the live path) instead of forcing NEUTRAL.
+        timeout = aiohttp.ClientTimeout(total=200, connect=10, sock_read=180)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             # ── Step 1: primary evaluator ──────────────────────────────────────
             primary_dir, primary_conf = await self._llm_call(
