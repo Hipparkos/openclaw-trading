@@ -289,17 +289,6 @@ class NewsClient:
         url = "http://openclaw_ollama:11434/api/chat"
         self.logger.info("openclaw: evaluating %s...", ticker)
 
-        query_text = f"{technical_context} {headline}"
-        query_embedding = await self._get_embedding(query_text, session)
-
-        memory_injection = await asyncio.to_thread(
-            self._fetch_live_memory_injection,
-            ticker,
-            technical_context,
-            headline,
-            query_embedding,
-        )
-
         system_prompt = (
             "You are an elite quantitative trading intelligence engine. "
             "Your sole function is to synthesize technical market structures and fundamental catalysts (news) "
@@ -331,9 +320,6 @@ class NewsClient:
             f"Headline Catalyst: {headline}\n\n"
             "Return the JSON evaluation now."
         )
-
-        if memory_injection:
-            user_prompt = f"{user_prompt}\n\n{memory_injection}"
 
         payload = {
             "model": "openclaw",
