@@ -7,7 +7,7 @@ import sys
 import math
 from datetime import datetime, timedelta, timezone, date
 from logging.handlers import RotatingFileHandler
-from data.screener import VolumeGainerScreener
+from data.screener import MomentumScreener
 from execution.order_manager import OrderManager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -199,8 +199,8 @@ async def main() -> None:
     logger.info("Starting screener in 2s...")
     await asyncio.sleep(2)
 
-    screener = VolumeGainerScreener()
-    screened_tickers = await screener.load_cached_symbols()
+    screener = MomentumScreener()
+    screened_tickers = await screener.load_or_screen()
 
     if screened_tickers:
         settings["tickers"] = screened_tickers
@@ -299,8 +299,12 @@ async def main() -> None:
     POSITION_PCT = 0.10           # base position = 10% of equity × confidence per trade
     LLM_CONF_THRESHOLD = 0.70     # min LLM confidence to open a trade
     MAX_GROSS_EXPOSURE_PCT = 0.90 # no new BUYs once open positions ≥ 90% of equity
+    SCREEN_HOUR_ET = 9            # daily re-screen fires from 09:00 ET (pre-open)
     eod_recap_sent_date: Optional[date] = None
     eod_liquidation_done_date: Optional[date] = None
+    # If the startup screen produced a list, mark today as done so the loop doesn't
+    # immediately re-scan; if it came back empty, leave it unset so the loop retries.
+    screened_date: Optional[date] = _now_et().date() if screened_tickers else None
 
     app.state.client = client
     app.state.settings = settings
@@ -756,13 +760,32 @@ async def main() -> None:
                     await asyncio.sleep(5)
                     continue
 
-                nonlocal eod_recap_sent_date, eod_liquidation_done_date
+                nonlocal eod_recap_sent_date, eod_liquidation_done_date, screened_date
                 today_et = _now_et().date()
 
                 # Reset daily stats at the start of each new trading day
                 if eod_recap_sent_date is not None and eod_recap_sent_date != today_et:
                     daily_closed_trades.clear()
                     circuit_breaker["halted"] = False
+
+                # Daily pre-market re-screen — refresh the momentum-leader watchlist
+                # once per trading day from 09:00 ET, before the 09:30 open.
+                now_et = _now_et()
+                if (screened_date != today_et and now_et.weekday() < 5
+                        and now_et.hour >= SCREEN_HOUR_ET):
+                    screened_date = today_et
+                    logger.info("Daily re-screen — scanning for today's momentum leaders...")
+                    try:
+                        fresh = await screener.screen()
+                        if fresh:
+                            settings["tickers"] = fresh
+                            logger.info("Watchlist updated (%d tickers): %s", len(fresh), fresh)
+                            for sym in fresh:
+                                await _subscribe_if_new(sym)
+                        else:
+                            logger.warning("Re-screen returned nothing — keeping current watchlist.")
+                    except Exception as exc:
+                        logger.exception("Daily re-screen failed: %s", exc)
 
                 # End of Day recap — sent once in the 10-minute window after close
                 if _is_just_after_close() and eod_recap_sent_date != today_et:
@@ -778,9 +801,14 @@ async def main() -> None:
                     eod_liquidation_done_date = today_et
 
                 scan = {"held": 0, "bull_setup": 0, "hourly_neutral": 0}
-                # Snapshot the list so a Discord !add mid-cycle can't disrupt iteration;
-                # the new ticker is simply picked up on the next pass.
-                active_tickers = list(settings["tickers"])
+                # Snapshot the list so a Discord !add or a re-screen mid-cycle can't
+                # disrupt iteration; new tickers are picked up on the next pass.
+                # Open positions are always included even if the daily re-screen
+                # dropped them from the watchlist — otherwise their stops, targets
+                # and trailing exits would stop being evaluated while still held.
+                active_tickers = list(dict.fromkeys(
+                    list(settings["tickers"]) + list(order_manager.get_all_positions().keys())
+                ))
                 for symbol in active_tickers:
                     if settings.get("backtest_mode"):
                         break

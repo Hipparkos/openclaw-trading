@@ -327,19 +327,19 @@ class TradingCommands(commands.Cog):
             return
 
         embed = discord.Embed(
-            title="🔍 VOLUME GAINER SCREENER",
-            description="Scanning market for top volume gainers...",
+            title="🔍 MOMENTUM SCREENER",
+            description="Scanning the US listed universe for momentum leaders — this takes a few minutes...",
             color=0x00AAFF,
         )
         status_msg = await ctx.send(embed=embed)
 
         try:
-            screened_tickers = await self.bot.screener.screen_volume_gainers()
+            screened_tickers = await self.bot.screener.screen()
 
             if not screened_tickers:
                 embed = discord.Embed(
                     title="🔍 SCREENER RESULTS",
-                    description="❌ No suitable stocks found. Market may be closed or no gainers meet criteria.",
+                    description="❌ No stocks met the momentum criteria.",
                     color=0xFF6600,
                 )
                 await status_msg.edit(embed=embed)
