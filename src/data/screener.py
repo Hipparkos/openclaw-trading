@@ -52,7 +52,7 @@ class MomentumScreener:
     # ── Scan mechanics ─────────────────────────────────────────────────────
     BATCH_SIZE = 150     # symbols per yfinance download call
     HISTORY_PERIOD = "6mo"
-    FULL_HISTORY_BARS = 50   # below this a name counts as an "IPO" for relaxation
+    SMA50_MIN_BARS = 50      # bars needed before the 50SMA extension check applies
 
     _NASDAQ_LISTED = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
     _OTHER_LISTED = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -159,8 +159,10 @@ class MomentumScreener:
             return None
         aptr = atr / last_close
 
-        # Short-history (IPO) names get eased volatility/momentum floors.
-        full_history = bars >= self.FULL_HISTORY_BARS
+        # Short-history (IPO) names get eased volatility/momentum floors. "Short"
+        # means we can't measure the full BMU lookback, so the bar it's judged on
+        # would otherwise be unfairly strict for a clipped window.
+        full_history = bars > self.BMU_PERIOD
         aptr_min = self.APTR_MIN if full_history else self.APTR_MIN * self.IPO_APTR_MULT
         bmu_min = self.BMU_MIN if full_history else self.BMU_MIN * self.IPO_BMU_MULT
 
@@ -198,7 +200,7 @@ class MomentumScreener:
         # 6. Extension above the 50SMA, measured in ATRs (skipped for IPO names
         #    that don't have 50 bars yet).
         extension = None
-        if full_history:
+        if bars >= self.SMA50_MIN_BARS:
             sma50 = float(close.rolling(50).mean().iloc[-1])
             if not pd.isna(sma50):
                 extension = (last_close - sma50) / atr
