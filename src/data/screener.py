@@ -37,7 +37,7 @@ class MomentumScreener:
     DOLLAR_VOL_MIN = 100_000_000
     APTR_PERIOD = 14
     APTR_MIN = 0.04
-    BMU_PERIOD = 30
+    BMU_PERIOD = 60
     BMU_MIN = 0.30
     NOT_AT_HIGHS_PERIOD = 30
     MUST_BE_ABOVE_10SMA = True
