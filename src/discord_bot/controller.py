@@ -354,23 +354,14 @@ class TradingCommands(commands.Cog):
                 for t in screened_tickers:
                     asyncio.create_task(self.bot.on_add_ticker(t))
 
-            # Show results
-            embed = discord.Embed(
-                title="🔍 SCREENER RESULTS",
-                description=f"✅ Found {len(screened_tickers)} suitable stocks for day trading",
-                color=0x00FF00,
+            # Post the full detail table, then clear the "scanning..." placeholder.
+            scr = self.bot.screener
+            await self.bot.send_screener_results(
+                getattr(scr, "last_picks", []),
+                getattr(scr, "last_qualified", 0),
+                getattr(scr, "last_scanned", 0),
             )
-            embed.add_field(
-                name="Updated Trading Tickers",
-                value=" | ".join(screened_tickers),
-                inline=False,
-            )
-            embed.add_field(
-                name="Status",
-                value="Bot will now trade only these tickers until next manual scan or daily reset.",
-                inline=False,
-            )
-            await status_msg.edit(embed=embed)
+            await status_msg.delete()
 
         except Exception as exc:
             logging.error("!screener command failed: %s", exc)
@@ -571,6 +562,60 @@ class OpenClawDiscord(commands.Bot):
         view = TradeApprovalView(self.order_manager, symbol, side)
         
         await channel.send(embed=embed, view=view)
+
+    async def send_screener_results(self, picks: list, qualified: int, scanned: int) -> None:
+        """Post today's momentum watchlist as a monospace table."""
+        channel = await self._get_target_channel()
+        if channel is None:
+            logging.error("Screener result suppressed: Discord channel could not be resolved.")
+            return
+
+        if not picks:
+            await channel.send(embed=discord.Embed(
+                title="Momentum Screener",
+                description=f"No stocks met the criteria today ({scanned:,} scanned).",
+                color=0xFF6600,
+            ))
+            return
+
+        header = f"{'TICKER':<7}{'BMU':>7}{'APTR':>6}{'$VOL':>8}{'EXT':>5}{'<HIGH':>7}  SECTOR"
+        lines = [header, "-" * len(header)]
+        for p in picks:
+            ext = f"{p['extension']:.1f}" if p.get("extension") is not None else "n/a"
+            lines.append(
+                f"{p['symbol']:<7}"
+                f"{p['bmu'] * 100:>+6.1f}%"
+                f"{p['aptr'] * 100:>5.1f}%"
+                f"{p['dollar_volume'] / 1e6:>7.0f}M"
+                f"{ext:>5}"
+                f"{p['pct_from_high'] * 100:>6.1f}%"
+                f"  {str(p.get('sector') or '-')[:14]}"
+            )
+        table = "\n".join(lines)
+        if len(table) > 3800:          # embed description cap is 4096
+            table = table[:3800] + "\n..."
+
+        embed = discord.Embed(
+            title="Momentum Screener — today's watchlist",
+            description=f"```{table}```",
+            color=0x00D4B8,
+        )
+
+        # Concentration check: top-N by momentum can pile into a single theme.
+        counts: dict[str, int] = {}
+        for p in picks:
+            sector = str(p.get("sector") or "-")
+            counts[sector] = counts.get(sector, 0) + 1
+        if counts:
+            spread = " · ".join(
+                f"{s} {c}" for s, c in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:5]
+            )
+            embed.add_field(name="Sector spread", value=spread, inline=False)
+
+        embed.set_footer(
+            text=f"{qualified} qualified of {scanned:,} scanned  •  trading top {len(picks)} by BMU"
+        )
+        await channel.send(embed=embed)
 
     async def send_eod_recap(self, stats: dict) -> None:
         channel = await self._get_target_channel()

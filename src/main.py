@@ -784,6 +784,9 @@ async def main() -> None:
                                 await _subscribe_if_new(sym)
                         else:
                             logger.warning("Re-screen returned nothing — keeping current watchlist.")
+                        await discord_ui.send_screener_results(
+                            screener.last_picks, screener.last_qualified, screener.last_scanned,
+                        )
                     except Exception as exc:
                         logger.exception("Daily re-screen failed: %s", exc)
 

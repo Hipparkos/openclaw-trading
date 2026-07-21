@@ -60,6 +60,10 @@ class MomentumScreener:
         self.logger = logging.getLogger("Screener")
         self.cache_path = Path(__file__).resolve().parents[2] / "data" / "screener_cache.json"
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        # Details of the most recent scan, for the Discord report
+        self.last_picks: List[dict] = []
+        self.last_qualified = 0
+        self.last_scanned = 0
 
     # ── Universe ───────────────────────────────────────────────────────────
 
@@ -174,6 +178,10 @@ class MomentumScreener:
             "extension": extension,
             "price": last_close,
             "bars": bars,
+            # How far below the recent high it sits — near-high = coiled/consolidating,
+            # far below = broken down. The pass/fail check alone throws this away.
+            "pct_from_high": (highest - last_close) / highest if highest > 0 else 0.0,
+            "sector": None,   # filled in for the final picks only (needs a .info call)
         }
 
     # ── Scan ───────────────────────────────────────────────────────────────
@@ -223,8 +231,26 @@ class MomentumScreener:
                              min(start + self.BATCH_SIZE, len(universe)),
                              len(universe), len(results))
 
+        self.last_scanned = len(universe)
+        self.last_qualified = len(results)
         results.sort(key=lambda r: r["dollar_volume"], reverse=True)
         return results[:self.TOP_N]
+
+    async def _fetch_sectors(self, symbols: List[str]) -> dict[str, str]:
+        """Sector lookup for the final picks only — one .info call each, in parallel."""
+        async def one(sym: str) -> tuple[str, str]:
+            try:
+                info = await asyncio.to_thread(lambda: yf.Ticker(sym).info)
+                return sym, (info.get("sector") or "—")
+            except Exception:
+                return sym, "—"
+
+        try:
+            pairs = await asyncio.gather(*(one(s) for s in symbols))
+            return dict(pairs)
+        except Exception as exc:
+            self.logger.warning("Sector lookup failed: %s", exc)
+            return {}
 
     async def screen(self) -> List[str]:
         """Run the full scan and return the tickers the bot should trade today."""
@@ -236,6 +262,11 @@ class MomentumScreener:
         # Qualified pool is ranked by liquidity; trade the strongest momentum from it.
         picks = sorted(leaders, key=lambda r: r["bmu"], reverse=True)[:self.FINAL_N]
         symbols = [r["symbol"] for r in picks]
+
+        sectors = await self._fetch_sectors(symbols)
+        for r in picks:
+            r["sector"] = sectors.get(r["symbol"], "—")
+        self.last_picks = picks
 
         self.logger.info("%d names qualified — trading top %d by BMU:", len(leaders), len(symbols))
         for r in picks:
