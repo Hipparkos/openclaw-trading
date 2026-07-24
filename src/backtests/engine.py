@@ -207,13 +207,15 @@ class BacktestEngine:
     # Mirror the live trading constants exactly
     WARMUP_BARS = 50
     SIGNAL_THRESHOLD = 3      # out of 4 indicators — 3/4 required for quality entries
-    STOP_LOSS_PCT = 0.02
+    STOP_ATR_MULT = 1.5      # hard stop = entry − 1.5 × entry-ATR (1:2 vs the 3×ATR TP1)
+    STOP_LOSS_PCT = 0.02     # fallback stop when ATR is unavailable
     DAILY_LOSS_LIMIT_PCT = 0.005  # halt new entries when day's P&L < -0.5% of equity
     ATR_TRAIL_MULT = 2.5
     TAKE_PROFIT_ATR_MULT = 3.0      # TP1 — first profit at entry + 3×ATR
     TAKE_PROFIT_2_ATR_MULT = 6.0    # TP2 — runner target at entry + 6×ATR
     SCALE_OUT_PCT = 0.60            # sell 60% at TP1, run the remaining 40%
-    POSITION_PCT = 0.10       # base position = 10% of equity × confidence per trade
+    RISK_PER_TRADE = 0.005    # size so each trade risks 0.5% of equity to the stop
+    MAX_POSITION_PCT = 0.10   # hard ceiling on position size (caps the risk-parity result)
     LLM_CONF_THRESHOLD = 0.70 # min LLM confidence to open a trade
     MIN_HOLD_BARS = 5         # 25 minutes before AI-reversal exit allowed
     COOLDOWN_BARS = 3         # 15-minute cooldown after close
@@ -634,19 +636,22 @@ class BacktestEngine:
                     exit_reason = "End-of-day liquidation"
 
                 # 1. Hard stop — a resting broker stop, filled intrabar at the stop level
-                #    (or the open on a gap). Before TP1 it sits at STOP_LOSS_PCT; after the
-                #    scale-out it has been raised to breakeven (entry) so the trade can't
-                #    turn into a loss.
+                #    (or the open on a gap). Before TP1 it sits STOP_ATR_MULT × entry-ATR
+                #    below entry (fixed % only if ATR is unavailable); after the scale-out
+                #    it is raised to breakeven (entry) so the trade can't turn into a loss.
+                atr_stop_dist = self.STOP_ATR_MULT * initial_atr if initial_atr > 0 else 0.0
                 if exit_reason is None:
                     if direction == "LONG":
-                        stop_level = entry_price if partial_taken else entry_price * (1 - self.STOP_LOSS_PCT)
+                        hard = (entry_price - atr_stop_dist) if atr_stop_dist > 0 else entry_price * (1 - self.STOP_LOSS_PCT)
+                        stop_level = entry_price if partial_taken else hard
                         if bar_low <= stop_level:
-                            exit_reason = "Breakeven stop" if partial_taken else "2% stop-loss"
+                            exit_reason = "Breakeven stop" if partial_taken else "ATR stop"
                             stop_fill = min(float(bar.open), stop_level)
                     else:
-                        stop_level = entry_price if partial_taken else entry_price * (1 + self.STOP_LOSS_PCT)
+                        hard = (entry_price + atr_stop_dist) if atr_stop_dist > 0 else entry_price * (1 + self.STOP_LOSS_PCT)
+                        stop_level = entry_price if partial_taken else hard
                         if bar_high >= stop_level:
-                            exit_reason = "Breakeven stop" if partial_taken else "2% stop-loss"
+                            exit_reason = "Breakeven stop" if partial_taken else "ATR stop"
                             stop_fill = max(float(bar.open), stop_level)
 
                 # 2. ATR trailing stop (anchored to initial_atr). After the scale-out the
@@ -798,7 +803,15 @@ class BacktestEngine:
                     continue
                 conf = llm_conf
 
-                qty = max(1, int((equity * self.POSITION_PCT * conf) / fill_price))
+                # Constant-risk sizing: risk RISK_PER_TRADE of equity to the ATR stop,
+                # so a stop-out costs the same regardless of the stock's volatility.
+                # Capped at MAX_POSITION_PCT of equity (also the fallback when ATR is 0).
+                max_shares = (equity * self.MAX_POSITION_PCT) / fill_price
+                if current_atr > 0:
+                    risk_shares = (equity * self.RISK_PER_TRADE) / (self.STOP_ATR_MULT * current_atr)
+                    qty = max(1, int(min(risk_shares, max_shares)))
+                else:
+                    qty = max(1, int(max_shares))
                 direction = "LONG"
                 entry_price = fill_price
                 entry_time = current_time

@@ -292,11 +292,14 @@ async def main() -> None:
     # Risk/exit constants — kept identical to BacktestEngine so live mirrors the backtest
     DAILY_LOSS_LIMIT_PCT = 0.005  # halt new entries when day P&L < -0.5% equity
     ATR_TRAIL_MULT = 2.5          # trailing stop = peak − 2.5 × entry-time ATR
+    STOP_ATR_MULT = 1.5          # hard stop = entry − 1.5 × entry-time ATR (1:2 vs 3×ATR TP1)
+    STOP_LOSS_PCT = 0.02         # fallback stop when ATR is unavailable
     TAKE_PROFIT_ATR_MULT = 3.0    # TP1 — first profit at entry + 3.0 × entry-time ATR
     TAKE_PROFIT_2_ATR_MULT = 6.0  # TP2 — runner target at entry + 6.0 × entry-time ATR
     SCALE_OUT_PCT = 0.60          # sell 60% at TP1, run the remaining 40%
     MIN_HOLD_MINUTES = 25         # 5 × 5m bars before take-profit / reversal exits
-    POSITION_PCT = 0.10           # base position = 10% of equity × confidence per trade
+    RISK_PER_TRADE = 0.005        # size so each trade risks 0.5% of equity to the stop
+    MAX_POSITION_PCT = 0.10       # hard ceiling on position size (caps the risk-parity result)
     LLM_CONF_THRESHOLD = 0.70     # min LLM confidence to open a trade
     MAX_GROSS_EXPOSURE_PCT = 0.90 # no new BUYs once open positions ≥ 90% of equity
     SCREEN_HOUR_ET = 9            # daily re-screen fires from 09:00 ET (pre-open)
@@ -638,26 +641,38 @@ async def main() -> None:
                         )
                         return
 
-                    target_capital = account_equity * POSITION_PCT * confidence if account_equity > 0.0 else 0.0
-                    calculated_shares = (target_capital / current_price) if current_price > 0.0 else 0.0
-                    trade_size = max(1, int(calculated_shares))
+                    # Constant-risk sizing: risk RISK_PER_TRADE of equity to the ATR stop,
+                    # so a stop-out costs the same whatever the stock's volatility. Capped
+                    # at MAX_POSITION_PCT of equity (also the fallback when ATR is 0).
+                    max_shares = (account_equity * MAX_POSITION_PCT) / current_price if account_equity > 0.0 else 0.0
+                    if account_equity > 0.0 and current_atr > 0.0:
+                        risk_shares = (account_equity * RISK_PER_TRADE) / (STOP_ATR_MULT * current_atr)
+                        trade_size = max(1, int(min(risk_shares, max_shares)))
+                    else:
+                        trade_size = max(1, int(max_shares))
                     logger.info(
-                        "%s sizing | equity $%.2f | target $%.2f | price $%.2f | shares %.2f → %d",
-                        symbol, account_equity, target_capital, current_price, calculated_shares, trade_size,
+                        "%s sizing | equity $%.2f | ATR $%.3f | risk %.1f%% | cap %.0f%% | shares → %d",
+                        symbol, account_equity, current_atr, RISK_PER_TRADE * 100,
+                        MAX_POSITION_PCT * 100, trade_size,
                     )
 
                     # Enter with a bracket order: a market BUY plus an attached resting
-                    # 2% stop. The stop activates only when the BUY fills (so it can never
-                    # rest naked) and fills near the stop intrabar — matching the backtest's
-                    # stop model instead of relying on this loop to catch the breach late.
-                    stop_price = round(current_price * 0.98, 2) if current_price > 0.0 else 0.0
+                    # stop at entry − STOP_ATR_MULT × ATR (fixed 2% only if ATR is 0). The
+                    # stop activates only when the BUY fills (so it can never rest naked)
+                    # and fills near the stop intrabar — matching the backtest's stop model.
+                    if current_price > 0.0 and current_atr > 0.0:
+                        stop_price = round(current_price - STOP_ATR_MULT * current_atr, 2)
+                    elif current_price > 0.0:
+                        stop_price = round(current_price * (1 - STOP_LOSS_PCT), 2)
+                    else:
+                        stop_price = 0.0
                     stop_trade = None
                     if stop_price > 0.0:
                         try:
                             _, stop_trade = await order_manager.place_bracket_buy(
                                 symbol, trade_size, stop_price
                             )
-                            logger.info("BUY %s x%d with resting stop at $%.2f (−2%%).",
+                            logger.info("BUY %s x%d with resting stop at $%.2f.",
                                         symbol, trade_size, stop_price)
                         except Exception as exc:
                             logger.warning("Bracket BUY failed for %s: %s — using plain market order.",
@@ -705,12 +720,15 @@ async def main() -> None:
                             entry_price = 0.0
 
                     # Fallback stop only — when no resting broker stop is active (e.g. it
-                    # failed to place). Normally the broker's resting stop handles the 2%
+                    # failed to place). Normally the broker's resting stop handles the
                     # exit and is reconciled at the top of the polling loop.
                     has_resting_stop = bool(trade_memory and trade_memory.get("stop_order") is not None)
+                    mem_atr = float(trade_memory.get("initial_atr", 0.0)) if trade_memory else 0.0
                     if entry_price > 0.0 and current_price > 0.0 and not has_resting_stop:
-                        loss_pct = ((entry_price - current_price) / entry_price) * 100.0
-                        if loss_pct >= 2.0:
+                        stop_level = (entry_price - STOP_ATR_MULT * mem_atr) if mem_atr > 0.0 \
+                            else entry_price * (1 - STOP_LOSS_PCT)
+                        if current_price <= stop_level:
+                            loss_pct = ((entry_price - current_price) / entry_price) * 100.0
                             sell_quantity = max(1, int(abs(holding_quantity)))
                             logger.warning(
                                 "Fallback stop-loss: %s | entry $%.2f → now $%.2f (−%.2f%%) | selling %d.",
@@ -852,8 +870,15 @@ async def main() -> None:
                                 fill_px = float(getattr(stop_trade.orderStatus, "avgFillPrice", 0.0)) or 0.0
                             except Exception:
                                 fill_px = 0.0
-                            # After TP1 the resting stop sits at breakeven (entry), not −2%.
-                            stop_ref = entry_price if was_partial else entry_price * 0.98
+                            # After TP1 the resting stop sits at breakeven (entry); before
+                            # it, at entry − STOP_ATR_MULT × ATR (fixed 2% if ATR unknown).
+                            mem_atr = float(pending_mem.get("initial_atr", 0.0))
+                            if was_partial:
+                                stop_ref = entry_price
+                            elif mem_atr > 0.0:
+                                stop_ref = entry_price - STOP_ATR_MULT * mem_atr
+                            else:
+                                stop_ref = entry_price * (1 - STOP_LOSS_PCT)
                             exit_px = fill_px if fill_px > 0.0 else (stop_ref if entry_price > 0.0 else current_price)
                             last_sell_time[symbol_key] = datetime.now(timezone.utc)
                             await _finalize_close(
