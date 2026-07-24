@@ -195,19 +195,21 @@ async def main() -> None:
         logger.error(e)
         sys.exit(1)
 
-    # Run screener once at startup (with brief delay to ensure APIs are ready)
-    logger.info("Starting screener in 2s...")
-    await asyncio.sleep(2)
-
+    # Fast, non-blocking startup: use today's cached screen if present, otherwise the
+    # settings.yaml fallback — so Discord and IBKR come online immediately. The full
+    # (multi-minute) universe scan is deferred to the daily re-screen in the main loop,
+    # which only fires once Discord is online.
     screener = MomentumScreener()
-    screened_tickers = await screener.load_or_screen()
+    screened_tickers = screener._cached_today()   # instant — reads cache file, no scan
 
     if screened_tickers:
         settings["tickers"] = screened_tickers
-        logger.info(f"Trading screened tickers: {screened_tickers}")
+        logger.info(f"Using today's cached screen: {screened_tickers}")
     else:
-        fallback_tickers = settings.get("tickers", [])
-        logger.warning(f"Screener empty — using fallback tickers from settings.yaml: {fallback_tickers}")
+        logger.info(
+            "No fresh screen yet — starting on fallback tickers %s; momentum scan runs once Discord is online.",
+            settings.get("tickers", []),
+        )
 
     client = IBKRClient(settings)
     order_manager = OrderManager(client)
@@ -695,8 +697,11 @@ async def main() -> None:
                         "stop_order": stop_trade,
                         "partial_taken": False,
                     }
-                    stop_loss = current_price * 0.98 if current_price > 0.0 else "N/A"
-                    target_price = current_price * 1.04 if current_price > 0.0 else "N/A"
+                    # Report the stop/target actually in force, not a hardcoded %: the
+                    # resting stop is at stop_price, TP1 is entry + 3 × entry-ATR.
+                    stop_loss = stop_price if stop_price > 0.0 else "N/A"
+                    target_price = (current_price + TAKE_PROFIT_ATR_MULT * current_atr) \
+                        if (current_price > 0.0 and current_atr > 0.0) else "N/A"
                     await discord_ui.send_execution_alert(
                         symbol=symbol,
                         action="BUY",
@@ -741,9 +746,9 @@ async def main() -> None:
                             stopped_trade_memory = open_trade_memory.pop(symbol_key, None)
                             await _finalize_close(
                                 symbol, stopped_trade_memory, entry_price, current_price, sell_quantity,
-                                "2% stop-loss triggered", signal_direction, holding_quantity > 0, technical_context,
+                                "ATR stop (fallback)", signal_direction, holding_quantity > 0, technical_context,
                             )
-                            logger.info("Closed %s x%d — 2%% stop-loss.", symbol, sell_quantity)
+                            logger.info("Closed %s x%d — ATR stop (fallback).", symbol, sell_quantity)
                             return
 
                 if signal_direction == "BEARISH" and is_holding:
@@ -787,10 +792,13 @@ async def main() -> None:
                     circuit_breaker["halted"] = False
 
                 # Daily pre-market re-screen — refresh the momentum-leader watchlist
-                # once per trading day from 09:00 ET, before the 09:30 open.
+                # once per trading day from 09:00 ET, before the 09:30 open. Gated on
+                # Discord being online (when a token is configured) so the bot is up
+                # and can post results before the multi-minute scan starts.
                 now_et = _now_et()
+                discord_online = discord_ui.is_ready() if discord_token else True
                 if (screened_date != today_et and now_et.weekday() < 5
-                        and now_et.hour >= SCREEN_HOUR_ET):
+                        and now_et.hour >= SCREEN_HOUR_ET and discord_online):
                     screened_date = today_et
                     logger.info("Daily re-screen — scanning for today's momentum leaders...")
                     try:
@@ -884,11 +892,11 @@ async def main() -> None:
                             await _finalize_close(
                                 symbol, pending_mem, entry_price, exit_px, closed_qty,
                                 ("Breakeven stop (resting order filled)" if was_partial
-                                 else "2% stop-loss (resting order filled)"),
+                                 else "ATR stop (resting order filled)"),
                                 "BULLISH", True, str(pending_mem.get("technical_context", "")),
                             )
                             logger.info("Resting stop filled for %s x%d — %s.", symbol, closed_qty,
-                                        "breakeven" if was_partial else "2% stop-loss")
+                                        "breakeven" if was_partial else "ATR stop")
                             continue
 
                     # ATR trailing stop and take-profit (active regardless of time, protect open capital)
