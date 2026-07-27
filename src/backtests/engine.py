@@ -207,12 +207,12 @@ class BacktestEngine:
     # Mirror the live trading constants exactly
     WARMUP_BARS = 50
     SIGNAL_THRESHOLD = 3      # out of 4 indicators — 3/4 required for quality entries
-    STOP_ATR_MULT = 1.5      # hard stop = entry − 1.5 × entry-ATR (1:2 vs the 3×ATR TP1)
+    STOP_ATR_MULT = 6.0      # hard stop = entry − 6 × entry-ATR (1:2 vs the 12×ATR TP1)
     STOP_LOSS_PCT = 0.02     # fallback stop when ATR is unavailable
     DAILY_LOSS_LIMIT_PCT = 0.005  # halt new entries when day's P&L < -0.5% of equity
-    ATR_TRAIL_MULT = 2.5
-    TAKE_PROFIT_ATR_MULT = 3.0      # TP1 — first profit at entry + 3×ATR
-    TAKE_PROFIT_2_ATR_MULT = 6.0    # TP2 — runner target at entry + 6×ATR
+    ATR_TRAIL_MULT = 8.0
+    TAKE_PROFIT_ATR_MULT = 12.0     # TP1 — first profit at entry + 12×ATR
+    TAKE_PROFIT_2_ATR_MULT = 24.0   # TP2 — runner target at entry + 24×ATR
     SCALE_OUT_PCT = 0.60            # sell 60% at TP1, run the remaining 40%
     RISK_PER_TRADE = 0.005    # size so each trade risks 0.5% of equity to the stop
     MAX_POSITION_PCT = 0.10   # hard ceiling on position size (caps the risk-parity result)

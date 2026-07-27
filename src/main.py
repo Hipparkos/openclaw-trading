@@ -293,11 +293,11 @@ async def main() -> None:
     circuit_breaker = {"halted": False}
     # Risk/exit constants — kept identical to BacktestEngine so live mirrors the backtest
     DAILY_LOSS_LIMIT_PCT = 0.005  # halt new entries when day P&L < -0.5% equity
-    ATR_TRAIL_MULT = 2.5          # trailing stop = peak − 2.5 × entry-time ATR
-    STOP_ATR_MULT = 1.5          # hard stop = entry − 1.5 × entry-time ATR (1:2 vs 3×ATR TP1)
+    ATR_TRAIL_MULT = 8.0          # trailing stop = peak − 8 × entry-time ATR
+    STOP_ATR_MULT = 6.0          # hard stop = entry − 6 × entry-time ATR (1:2 vs 12×ATR TP1)
     STOP_LOSS_PCT = 0.02         # fallback stop when ATR is unavailable
-    TAKE_PROFIT_ATR_MULT = 3.0    # TP1 — first profit at entry + 3.0 × entry-time ATR
-    TAKE_PROFIT_2_ATR_MULT = 6.0  # TP2 — runner target at entry + 6.0 × entry-time ATR
+    TAKE_PROFIT_ATR_MULT = 12.0   # TP1 — first profit at entry + 12 × entry-time ATR
+    TAKE_PROFIT_2_ATR_MULT = 24.0 # TP2 — runner target at entry + 24 × entry-time ATR
     SCALE_OUT_PCT = 0.60          # sell 60% at TP1, run the remaining 40%
     MIN_HOLD_MINUTES = 25         # 5 × 5m bars before take-profit / reversal exits
     RISK_PER_TRADE = 0.005        # size so each trade risks 0.5% of equity to the stop
