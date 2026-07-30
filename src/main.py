@@ -555,10 +555,12 @@ async def main() -> None:
                 # the identical blocks in the stop / trailing / take-profit / reversal /
                 # reconciliation exits.
                 entry_time_mem = mem.get("entry_time") if mem else None
+                entry_conf = float(mem.get("entry_confidence", 0.0)) if mem else 0.0
+                # Always record the trade (needed for daily EOD stats), even if
+                # memory is absent (mem=None means entry data wasn't captured/available).
+                _record_closed_trade(entry_price, exit_price, quantity, entry_conf,
+                                     symbol=symbol, entry_time=entry_time_mem)
                 if mem:
-                    entry_conf = float(mem.get("entry_confidence", 0.0))
-                    _record_closed_trade(entry_price, exit_price, quantity, entry_conf,
-                                         symbol=symbol, entry_time=entry_time_mem)
                     await news_client.record_trade_memory_async(
                         symbol=symbol,
                         technical_context=str(mem.get("technical_context", market_story)),
