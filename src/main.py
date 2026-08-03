@@ -138,8 +138,8 @@ def _is_just_after_close() -> bool:
     return closes <= now < recap_end
 
 
-def _compute_eod_stats(daily_closed_trades: List[Dict[str, Any]], account_equity: float) -> Dict[str, Any]:
-    total = len(daily_closed_trades)
+def _compute_eod_stats(trades: List[Dict[str, Any]], account_equity: float) -> Dict[str, Any]:
+    total = len(trades)
     if total == 0:
         return {
             "net_pnl": 0.0,
@@ -154,17 +154,18 @@ def _compute_eod_stats(daily_closed_trades: List[Dict[str, Any]], account_equity
             "avg_confidence_losses": 0.0,
         }
 
-    net_pnl = sum(t["pnl"] for t in daily_closed_trades)
-    win_trades = [t for t in daily_closed_trades if t["pnl"] >= 0]
-    loss_trades = [t for t in daily_closed_trades if t["pnl"] < 0]
+    net_pnl = sum(t["pnl"] for t in trades)
+    win_trades = [t for t in trades if t["pnl"] >= 0]
+    loss_trades = [t for t in trades if t["pnl"] < 0]
 
     avg_win = sum(t["pnl"] for t in win_trades) / len(win_trades) if win_trades else 0.0
     avg_loss = sum(t["pnl"] for t in loss_trades) / len(loss_trades) if loss_trades else 0.0
     largest_win = max((t["pnl"] for t in win_trades), default=0.0)
     largest_loss = min((t["pnl"] for t in loss_trades), default=0.0)
 
-    conf_wins = [t["confidence"] for t in win_trades if t["confidence"] > 0]
-    conf_losses = [t["confidence"] for t in loss_trades if t["confidence"] > 0]
+    # confidence is nullable in the DB — coerce so a legacy NULL row can't crash the recap
+    conf_wins = [c for t in win_trades if (c := t["confidence"] or 0.0) > 0]
+    conf_losses = [c for t in loss_trades if (c := t["confidence"] or 0.0) > 0]
     avg_conf_win = sum(conf_wins) / len(conf_wins) if conf_wins else 0.0
     avg_conf_loss = sum(conf_losses) / len(conf_losses) if conf_losses else 0.0
 
@@ -288,7 +289,6 @@ async def main() -> None:
     trade_history_db = TradeHistoryDB()
 
     # Day-scoped state — reset each trading day
-    daily_closed_trades: List[Dict[str, Any]] = []
     # Mutable dict so nested functions can mutate without nonlocal
     circuit_breaker = {"halted": False}
     # Risk/exit constants — kept identical to BacktestEngine so live mirrors the backtest
@@ -326,6 +326,13 @@ async def main() -> None:
         signal.signal(signal.SIGINT, lambda sig, frame: loop.call_soon_threadsafe(graceful_shutdown))
         signal.signal(signal.SIGTERM, lambda sig, frame: loop.call_soon_threadsafe(graceful_shutdown))
 
+    def _todays_trades() -> List[Dict[str, Any]]:
+        # Today's closed trades, read from the persistent DB rather than kept in
+        # memory — the container restarts on every redeploy (restart: always), and
+        # an in-memory tally would silently reset to zero mid-session.
+        start_of_day = _now_et().replace(hour=0, minute=0, second=0, microsecond=0)
+        return trade_history_db.get_trades(since=start_of_day.astimezone(timezone.utc))
+
     def _record_closed_trade(
         entry_price: float,
         exit_price: float,
@@ -337,7 +344,6 @@ async def main() -> None:
     ) -> None:
         if entry_price > 0.0 and exit_price > 0.0:
             pnl = (exit_price - entry_price) * quantity
-            daily_closed_trades.append({"pnl": pnl, "confidence": confidence})
             if symbol:
                 trade_history_db.record(
                     symbol=symbol,
@@ -351,7 +357,8 @@ async def main() -> None:
                 )
             # Check circuit breaker after recording the trade
             if not circuit_breaker["halted"]:
-                daily_net = sum(t["pnl"] for t in daily_closed_trades)
+                todays = _todays_trades()
+                daily_net = sum(t["pnl"] for t in todays)
                 account_eq = order_manager.get_account_equity()
                 if account_eq > 0 and daily_net < -(DAILY_LOSS_LIMIT_PCT * account_eq):
                     circuit_breaker["halted"] = True
@@ -362,7 +369,7 @@ async def main() -> None:
                     )
                     asyncio.create_task(discord_ui.send_circuit_breaker_alert(
                         daily_loss=daily_net,
-                        trade_count=len(daily_closed_trades),
+                        trade_count=len(todays),
                         equity=account_eq,
                         limit_pct=DAILY_LOSS_LIMIT_PCT,
                     ))
@@ -555,12 +562,10 @@ async def main() -> None:
                 # the identical blocks in the stop / trailing / take-profit / reversal /
                 # reconciliation exits.
                 entry_time_mem = mem.get("entry_time") if mem else None
-                entry_conf = float(mem.get("entry_confidence", 0.0)) if mem else 0.0
-                # Always record the trade (needed for daily EOD stats), even if
-                # memory is absent (mem=None means entry data wasn't captured/available).
-                _record_closed_trade(entry_price, exit_price, quantity, entry_conf,
-                                     symbol=symbol, entry_time=entry_time_mem)
                 if mem:
+                    entry_conf = float(mem.get("entry_confidence", 0.0))
+                    _record_closed_trade(entry_price, exit_price, quantity, entry_conf,
+                                         symbol=symbol, entry_time=entry_time_mem)
                     await news_client.record_trade_memory_async(
                         symbol=symbol,
                         technical_context=str(mem.get("technical_context", market_story)),
@@ -788,9 +793,9 @@ async def main() -> None:
                 nonlocal eod_recap_sent_date, eod_liquidation_done_date, screened_date
                 today_et = _now_et().date()
 
-                # Reset daily stats at the start of each new trading day
+                # Reset the circuit breaker at the start of each new trading day.
+                # Daily P&L needs no reset — it is queried per-day from the DB.
                 if eod_recap_sent_date is not None and eod_recap_sent_date != today_et:
-                    daily_closed_trades.clear()
                     circuit_breaker["halted"] = False
 
                 # Daily pre-market re-screen — refresh the momentum-leader watchlist
@@ -821,7 +826,7 @@ async def main() -> None:
                 # End of Day recap — sent once in the 10-minute window after close
                 if _is_just_after_close() and eod_recap_sent_date != today_et:
                     logger.info("Market closed — sending end-of-day recap.")
-                    stats = _compute_eod_stats(daily_closed_trades, order_manager.get_account_equity())
+                    stats = _compute_eod_stats(_todays_trades(), order_manager.get_account_equity())
                     await discord_ui.send_eod_recap(stats)
                     eod_recap_sent_date = today_et
 
