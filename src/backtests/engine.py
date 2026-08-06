@@ -207,14 +207,20 @@ class BacktestEngine:
     # Mirror the live trading constants exactly
     WARMUP_BARS = 50
     SIGNAL_THRESHOLD = 3      # out of 4 indicators — 3/4 required for quality entries
-    STOP_ATR_MULT = 6.0      # hard stop = entry − 6 × entry-ATR (1:2 vs the 12×ATR TP1)
+    # Intraday geometry: on a 5-minute ATR these multipliers must be reachable
+    # inside one session, since every position is flattened at 15:50 ET. A 6×ATR
+    # stop / 12×ATR TP1 put the target ~43% away on a volatile name — unreachable,
+    # so trades could only ever end at the stop or the EoD close.
+    STOP_ATR_MULT = 2.0      # hard stop = entry − 2 × entry-ATR (1:1.5 vs the 3×ATR TP1)
     STOP_LOSS_PCT = 0.02     # fallback stop when ATR is unavailable
-    DAILY_LOSS_LIMIT_PCT = 0.005  # halt new entries when day's P&L < -0.5% of equity
-    ATR_TRAIL_MULT = 8.0
-    TAKE_PROFIT_ATR_MULT = 12.0     # TP1 — first profit at entry + 12×ATR
-    TAKE_PROFIT_2_ATR_MULT = 24.0   # TP2 — runner target at entry + 24×ATR
+    DAILY_LOSS_LIMIT_PCT = 0.015  # halt new entries when day's P&L < -1.5% of equity
+    ATR_TRAIL_MULT = 2.5
+    TAKE_PROFIT_ATR_MULT = 3.0      # TP1 — first profit at entry + 3×ATR
+    TAKE_PROFIT_2_ATR_MULT = 6.0    # TP2 — runner target at entry + 6×ATR
     SCALE_OUT_PCT = 0.60            # sell 60% at TP1, run the remaining 40%
-    RISK_PER_TRADE = 0.005    # size so each trade risks 0.5% of equity to the stop
+    # Kept well below DAILY_LOSS_LIMIT_PCT so one stop-out can't halt the day:
+    # 1.5% / 0.25% = 6 full-risk losers before the circuit breaker trips.
+    RISK_PER_TRADE = 0.0025   # size so each trade risks 0.25% of equity to the stop
     MAX_POSITION_PCT = 0.10   # hard ceiling on position size (caps the risk-parity result)
     LLM_CONF_THRESHOLD = 0.70 # min LLM confidence to open a trade
     MIN_HOLD_BARS = 5         # 25 minutes before AI-reversal exit allowed
