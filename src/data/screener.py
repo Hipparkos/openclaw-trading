@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import List
@@ -17,10 +18,13 @@ _ET = ZoneInfo("America/New_York")
 
 
 class MomentumScreener:
-    """Daily scan of the full US listed universe for momentum leaders.
+    """Daily scan of the US listed universe for momentum leaders.
+
+    Universe: NASDAQ, NYSE and NYSE ARCA common stock only (see _fetch_universe).
 
     All criteria are computed on DAILY bars:
-      • dollar volume  — mean(close × volume) over DOLLAR_VOL_PERIOD ≥ DOLLAR_VOL_MIN
+      • dollar volume  — MEDIAN(close × volume) over DOLLAR_VOL_PERIOD ≥ DOLLAR_VOL_MIN
+      • one-day spike  — no single day in SPIKE_LOOKBACK moved > MAX_SINGLE_DAY_MOVE
       • APTR           — ATR(APTR_PERIOD) / close ≥ APTR_MIN      (volatility floor)
       • BMU            — % gain over BMU_PERIOD ≥ BMU_MIN         (momentum)
       • trend          — close > SMA(10)
@@ -33,8 +37,15 @@ class MomentumScreener:
     """
 
     # ── Screen configuration ───────────────────────────────────────────────
-    DOLLAR_VOL_PERIOD = 2
+    # Median, not mean, and over a long window: a single pump day (e.g. XHG, +350%
+    # on 86M shares with a few thousand on either side) carries a short mean over
+    # the threshold on its own. A median needs HALF the window to be liquid.
+    DOLLAR_VOL_PERIOD = 20
     DOLLAR_VOL_MIN = 100_000_000
+    # Reject names whose recent history contains a blow-off day — momentum should
+    # be built over weeks, not printed in one session.
+    SPIKE_LOOKBACK = 60
+    MAX_SINGLE_DAY_MOVE = 0.50
     APTR_PERIOD = 14
     APTR_MIN = 0.04
     BMU_PERIOD = 60
@@ -57,6 +68,20 @@ class MomentumScreener:
     _NASDAQ_LISTED = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
     _OTHER_LISTED = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
 
+    # otherlisted.txt covers every non-NASDAQ venue. Keep NYSE (N) and NYSE ARCA
+    # (P); drop NYSE American (A), Cboe BZX (Z) and IEX (V) — the paper account
+    # cannot reliably route to those and they carry the thinnest listings.
+    _OTHER_EXCHANGES_ALLOWED = {"N", "P"}
+
+    # The ETF column misses ETNs, closed-end funds, preferreds and debt issues,
+    # so the security name is screened too. Word-boundary matched so real
+    # companies ("United…", "Fundamental…") are not caught.
+    _NAME_EXCLUDE = re.compile(
+        r"\b(etf|etn|fund|funds|depositary|preferred|pfd|warrants?|units?|"
+        r"rights?|notes?|debentures?|bonds?)\b",
+        re.IGNORECASE,
+    )
+
     def __init__(self) -> None:
         self.logger = logging.getLogger("Screener")
         self.cache_path = Path(__file__).resolve().parents[2] / "data" / "screener_cache.json"
@@ -71,8 +96,12 @@ class MomentumScreener:
     # ── Universe ───────────────────────────────────────────────────────────
 
     def _fetch_universe(self) -> List[str]:
-        """All US listed common-stock symbols (ETFs, test issues and
-        warrants/units/preferreds removed)."""
+        """NASDAQ / NYSE / NYSE ARCA common-stock symbols.
+
+        Removed: other venues (NYSE American, Cboe BZX, IEX), ETFs and ETNs,
+        closed-end funds, preferreds, warrants/units/rights, debt issues, test
+        issues, and issuers flagged financially deficient, delinquent or bankrupt.
+        """
         symbols: set[str] = set()
         headers = {"User-Agent": "Mozilla/5.0"}
 
@@ -91,12 +120,30 @@ class MomentumScreener:
                     df = df[df["Test Issue"] != "Y"]
                 if "ETF" in df.columns and not self.INCLUDE_ETFS:
                     df = df[df["ETF"] != "Y"]
+
+                # otherlisted.txt only — restrict to NYSE (N) and NYSE ARCA (P).
+                if "Exchange" in df.columns:
+                    df = df[df["Exchange"].isin(self._OTHER_EXCHANGES_ALLOWED)]
+
+                # nasdaqlisted.txt only — "N" is normal; D/E/Q mark deficient,
+                # delinquent or bankrupt issuers, which are poor trade candidates.
+                if "Financial Status" in df.columns:
+                    df = df[df["Financial Status"] == "N"]
+
+                # Catch the non-equity instruments the ETF column misses.
+                if "Security Name" in df.columns and not self.INCLUDE_ETFS:
+                    df = df[~df["Security Name"].astype(str)
+                            .str.contains(self._NAME_EXCLUDE, na=False)]
+
+                before = len(symbols)
                 for raw in df[sym_col].astype(str):
                     sym = raw.strip().upper()
                     # Plain alphabetic tickers only — drops warrants/units/preferreds
                     # which carry '$', '.', '-' suffixes.
                     if sym.isalpha() and 1 <= len(sym) <= 5:
                         symbols.add(sym)
+                self.logger.info("  %s → %d tradable symbols",
+                                 url.rsplit("/", 1)[-1], len(symbols) - before)
             except Exception as exc:
                 self.logger.warning("Could not fetch symbol list %s: %s", url, exc)
 
@@ -140,13 +187,25 @@ class MomentumScreener:
             rej["no_data"] += 1
             return None
 
-        # 1. Dollar volume
-        dollar_volume = float((close * volume).tail(self.DOLLAR_VOL_PERIOD).mean())
+        # 1. Dollar volume — MEDIAN over the window, so a name only qualifies if it
+        #    is liquid on a typical day. A mean (especially a 2-day mean) is carried
+        #    over the line by one pump session on its own.
+        dollar_volume = float((close * volume).tail(self.DOLLAR_VOL_PERIOD).median())
         if pd.isna(dollar_volume) or dollar_volume < self.DOLLAR_VOL_MIN:
             rej["dollar_vol"] += 1
             return None
 
-        # 2. APTR — ATR as a fraction of price
+        # 2. One-day spike guard — reject blow-off names whose entire move is a
+        #    single session (XHG: +350% on 86M shares, a few thousand the day
+        #    before, 2M the day after). That is a liquidity event, not a trend,
+        #    and it leaves no stable ATR to size a stop against.
+        daily_moves = close.pct_change().tail(self.SPIKE_LOOKBACK).abs()
+        biggest_day = float(daily_moves.max()) if len(daily_moves) else float("nan")
+        if not pd.isna(biggest_day) and biggest_day > self.MAX_SINGLE_DAY_MOVE:
+            rej["one_day_spike"] += 1
+            return None
+
+        # 3. APTR — ATR as a fraction of price
         prev_close = close.shift(1)
         true_range = pd.concat([
             high - low,
@@ -170,7 +229,7 @@ class MomentumScreener:
             rej["aptr"] += 1
             return None
 
-        # 3. BMU — % gain over the lookback (clipped to available history)
+        # 4. BMU — % gain over the lookback (clipped to available history)
         lookback = min(self.BMU_PERIOD, bars - 1)
         past_close = float(close.iloc[-1 - lookback])
         if past_close <= 0:
@@ -181,14 +240,14 @@ class MomentumScreener:
             rej["bmu"] += 1
             return None
 
-        # 4. Healthy trend — above the 10SMA
+        # 5. Healthy trend — above the 10SMA
         if self.MUST_BE_ABOVE_10SMA:
             sma10 = float(close.rolling(10).mean().iloc[-1])
             if pd.isna(sma10) or last_close <= sma10:
                 rej["sma10"] += 1
                 return None
 
-        # 5. Not at highs — compare against the high of the PRIOR window, excluding
+        # 6. Not at highs — compare against the high of the PRIOR window, excluding
         #    the latest bar (including it makes the test vacuous, since today's
         #    intraday high is almost always ≥ today's close).
         prior_high = high.iloc[-1 - self.NOT_AT_HIGHS_PERIOD:-1]
@@ -197,7 +256,7 @@ class MomentumScreener:
             rej["at_highs"] += 1
             return None
 
-        # 6. Extension above the 50SMA, measured in ATRs (skipped for IPO names
+        # 7. Extension above the 50SMA, measured in ATRs (skipped for IPO names
         #    that don't have 50 bars yet).
         extension = None
         if bars >= self.SMA50_MIN_BARS:
@@ -234,8 +293,8 @@ class MomentumScreener:
         self.logger.info("Scanning %d US listed symbols for momentum leaders...", len(universe))
         results: List[dict] = []
         self._reject = {k: 0 for k in
-                        ("no_data", "short_history", "dollar_vol", "aptr",
-                         "bmu", "sma10", "at_highs", "extension")}
+                        ("no_data", "short_history", "dollar_vol", "one_day_spike",
+                         "aptr", "bmu", "sma10", "at_highs", "extension")}
         evaluated = 0
         lost_batches = 0
 
@@ -287,11 +346,11 @@ class MomentumScreener:
         r = self._reject
         self.logger.info(
             "Screen funnel | universe=%d evaluated=%d lost_batches=%d || rejected: "
-            "no_data=%d short_history=%d $vol=%d APTR=%d BMU=%d <10SMA=%d at_highs=%d extension=%d "
-            "|| qualified=%d",
+            "no_data=%d short_history=%d $vol=%d spike=%d APTR=%d BMU=%d <10SMA=%d "
+            "at_highs=%d extension=%d || qualified=%d",
             len(universe), evaluated, lost_batches,
-            r["no_data"], r["short_history"], r["dollar_vol"], r["aptr"],
-            r["bmu"], r["sma10"], r["at_highs"], r["extension"], len(results),
+            r["no_data"], r["short_history"], r["dollar_vol"], r["one_day_spike"],
+            r["aptr"], r["bmu"], r["sma10"], r["at_highs"], r["extension"], len(results),
         )
 
         self.last_scanned = len(universe)
