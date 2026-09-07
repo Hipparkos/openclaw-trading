@@ -458,6 +458,8 @@ async def main() -> None:
 
     discord_ui.on_manual_sell = liquidate_all_positions
     discord_ui.circuit_breaker = circuit_breaker
+    discord_ui.open_trade_memory = open_trade_memory   # same dict, mutated in place
+    discord_ui.get_todays_trades = _todays_trades
 
     try:
         logger.info("OpenClaw starting up...")
@@ -1081,14 +1083,23 @@ async def main() -> None:
                     # The LLM is the decision maker — no technical-fallback entries.
                     # Technicals qualify the candidate; only a confident BULLISH
                     # verdict from the LLM opens a position (mirrors the backtest).
+                    # Dashboard decision log — only candidates that cleared the technical
+                    # gate and reached an LLM verdict are worth recording; the routine
+                    # "no setup" rejections that fire every cycle for most of the
+                    # watchlist would just drown these out.
+                    gate_label = f"BULL {tech_conf:.2f}"
+
                     if llm_dir != "BULLISH":
                         logger.info("%s: entry skipped — LLM verdict %s.", symbol, llm_dir)
+                        discord_ui.decision_log.record(symbol, gate_label, f"{llm_dir} {llm_conf:.2f}", "llm veto")
                         continue
                     if llm_conf < LLM_CONF_THRESHOLD:
                         logger.info("%s: entry skipped — LLM confidence %.2f < %.2f.",
                                     symbol, llm_conf, LLM_CONF_THRESHOLD)
+                        discord_ui.decision_log.record(symbol, gate_label, f"BULL {llm_conf:.2f}", "low confidence")
                         continue
 
+                    discord_ui.decision_log.record(symbol, gate_label, f"BULL {llm_conf:.2f}", "entered")
                     await _route_trade(
                         symbol=symbol,
                         signal_direction="BULLISH",

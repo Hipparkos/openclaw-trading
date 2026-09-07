@@ -7,6 +7,7 @@ import discord
 from discord.ext import commands
 
 from data.trade_db import TradeHistoryDB
+from discord_bot.dashboard import DashboardController, DashboardState, DecisionLog
 from discord_bot.stats_chart import generate_stats_chart
 
 class TradeApprovalView(discord.ui.View):
@@ -409,6 +410,17 @@ class TradingCommands(commands.Cog):
             return
         await ctx.send(embed=embed, file=file, view=view)
 
+    @commands.command(name="dashboard")
+    async def dashboard(self, ctx) -> None:
+        """Post the live-updating panel (Positions / Decisions / Watchlist) in
+        this channel. It refreshes itself every 30s — no need to re-run this
+        unless the panel was deleted or you want it moved here."""
+        if self.bot.dashboard is None:
+            await ctx.send("Dashboard is not ready yet — try again in a few seconds.")
+            return
+        await self.bot.dashboard.post_new(ctx.channel)
+        await ctx.send("📌 Dashboard posted and pinned — it updates itself every 30 seconds.")
+
 
 class OpenClawDiscord(commands.Bot):
     def __init__(self, order_manager):
@@ -424,7 +436,12 @@ class OpenClawDiscord(commands.Bot):
         self.screener = None          # set by main after startup
         self.settings = None          # set by main after startup
         self.circuit_breaker = None   # set by main after startup
-        
+        self.open_trade_memory: dict = {}      # set by main after startup (same dict, mutated in place)
+        self.get_todays_trades = lambda: []    # set by main after startup
+
+        self.decision_log = DecisionLog()
+        self.dashboard: DashboardController | None = None  # built once dependencies are wired, in on_ready
+
         try:
             self.channel_id = int(os.getenv("DISCORD_CHANNEL_ID", 0))
         except (ValueError, TypeError):
@@ -436,6 +453,32 @@ class OpenClawDiscord(commands.Bot):
 
     async def on_ready(self):
         logging.info(f"Discord UI online as {self.user}.")
+
+        # Built here, not in __init__: main.py wires screener/settings/
+        # circuit_breaker/open_trade_memory/get_todays_trades onto this bot
+        # synchronously before calling .start(), so they're all present by
+        # the time on_ready fires. Guard against on_ready firing again on
+        # reconnect — only build the controller once.
+        if self.dashboard is None:
+            state = DashboardState(
+                order_manager=self.order_manager,
+                screener=self.screener,
+                settings=self.settings,
+                circuit_breaker=self.circuit_breaker,
+                open_trade_memory=self.open_trade_memory,
+                get_todays_trades=self.get_todays_trades,
+                decision_log=self.decision_log,
+            )
+            self.dashboard = DashboardController(self, state)
+            self.dashboard.register_persistent_view()
+            resumed = await self.dashboard.resume_if_known()
+            if resumed:
+                logging.info("Dashboard re-attached to its existing message after restart.")
+            else:
+                channel = await self._get_target_channel()
+                if channel is not None:
+                    await self.dashboard.post_new(channel)
+                    logging.info("Dashboard posted to the default channel.")
 
     async def _get_target_channel(self):
         if not self.channel_id:

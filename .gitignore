@@ -5,6 +5,7 @@ data/logs/
 data/database/*.db
 data/database/*.sqlite
 data/database/*.sqlite3
+data/database/dashboard_state.json
 __pycache__/
 *.py[cod]
 *$py.class
