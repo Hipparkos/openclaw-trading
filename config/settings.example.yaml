@@ -1,0 +1,6 @@
+connection:
+  host: "ib-gateway"
+  port: 4004
+  clientId: 1
+  exchange: "SMART"
+  currency: "USD"

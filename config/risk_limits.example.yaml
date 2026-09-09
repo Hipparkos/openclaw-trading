@@ -1,0 +1,24 @@
+# Copy to risk_limits.yaml. NOT currently read by the code — the actual risk
+# and exit constants live as class attributes at the top of src/main.py
+# (STOP_ATR_MULT, TAKE_PROFIT_ATR_MULT, RISK_PER_TRADE, DAILY_LOSS_LIMIT_PCT,
+# etc.) and are mirrored in src/backtests/engine.py so live and backtest can
+# never quietly diverge. Change values there, in both files, together.
+#
+# This file exists as a single documented reference for what those constants
+# currently are, and as the landing spot for a future move to config-driven
+# risk limits (see the continuation plan: sector/correlation exposure caps).
+# Values below match main.py as of the last time this file was updated —
+# treat main.py as the source of truth if the two disagree.
+
+risk_per_trade_pct: 0.25        # RISK_PER_TRADE — risked to the stop, per trade
+max_position_pct: 10.0          # MAX_POSITION_PCT — hard cap regardless of ATR
+daily_loss_limit_pct: 1.5       # DAILY_LOSS_LIMIT_PCT — halts new entries for the day
+max_gross_exposure_pct: 90.0    # MAX_GROSS_EXPOSURE_PCT — cap on total deployed capital
+
+stop_atr_mult: 2.0               # STOP_ATR_MULT — hard stop = entry − mult × entry-ATR
+trail_atr_mult: 2.5              # ATR_TRAIL_MULT
+take_profit_1_atr_mult: 3.0      # TAKE_PROFIT_ATR_MULT — first target, 60% scale-out
+take_profit_2_atr_mult: 6.0      # TAKE_PROFIT_2_ATR_MULT — runner target
+
+llm_confidence_threshold: 0.70   # LLM_CONF_THRESHOLD — minimum confidence to enter
+min_hold_minutes: 25             # MIN_HOLD_MINUTES — before a reversal exit is allowed
