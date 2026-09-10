@@ -419,7 +419,6 @@ class TradingCommands(commands.Cog):
             await ctx.send("Dashboard is not ready yet — try again in a few seconds.")
             return
         await self.bot.dashboard.post_new(ctx.channel)
-        await ctx.send("📌 Dashboard posted and pinned — it updates itself every 30 seconds.")
 
 
 class OpenClawDiscord(commands.Bot):
@@ -448,6 +447,15 @@ class OpenClawDiscord(commands.Bot):
             logging.error("DISCORD_CHANNEL_ID in your .env file is missing or not a valid number.")
             self.channel_id = None
 
+        # Optional dedicated channel for the live dashboard. Falls back to the
+        # main channel when unset, so existing setups keep working unchanged.
+        try:
+            raw = str(os.getenv("DISCORD_DASHBOARD_CHANNEL_ID", "")).strip()
+            self.dashboard_channel_id = int(raw) if raw else self.channel_id
+        except (ValueError, TypeError):
+            logging.error("DISCORD_DASHBOARD_CHANNEL_ID is not a valid number — using DISCORD_CHANNEL_ID.")
+            self.dashboard_channel_id = self.channel_id
+
     async def setup_hook(self):
         await self.add_cog(TradingCommands(self))
 
@@ -475,23 +483,29 @@ class OpenClawDiscord(commands.Bot):
             if resumed:
                 logging.info("Dashboard re-attached to its existing message after restart.")
             else:
-                channel = await self._get_target_channel()
+                channel = await self._get_dashboard_channel()
                 if channel is not None:
                     await self.dashboard.post_new(channel)
-                    logging.info("Dashboard posted to the default channel.")
+                    logging.info("Dashboard posted to channel %s.", channel.id)
 
     async def _get_target_channel(self):
-        if not self.channel_id:
+        return await self._resolve_channel(self.channel_id)
+
+    async def _get_dashboard_channel(self):
+        return await self._resolve_channel(self.dashboard_channel_id or self.channel_id)
+
+    async def _resolve_channel(self, channel_id):
+        if not channel_id:
             return None
 
-        channel = self.get_channel(self.channel_id)
+        channel = self.get_channel(channel_id)
         if channel is not None:
             return channel
 
         try:
-            return await self.fetch_channel(self.channel_id)
+            return await self.fetch_channel(channel_id)
         except Exception as exc:
-            logging.error("Unable to resolve Discord channel %s: %s", self.channel_id, exc)
+            logging.error("Unable to resolve Discord channel %s: %s", channel_id, exc)
             return None
 
     async def send_circuit_breaker_alert(
