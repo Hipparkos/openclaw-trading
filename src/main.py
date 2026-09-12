@@ -441,7 +441,7 @@ async def main() -> None:
             else:
                 exit_price = _get_last_price(symbol) or 0.0
 
-            exit_reason = "End-of-day close" if reason == "End-of-Day" else "Manual close (!closeall)"
+            exit_reason = "End-of-day close" if reason == "End-of-Day" else f"Manual close ({reason})"
             await discord_ui.send_close_alert(
                 symbol=symbol,
                 is_long=is_long,

@@ -205,7 +205,7 @@ class TradingCommands(commands.Cog):
         await ctx.send(embed=embed)
 
         try:
-            results = await self.bot.on_manual_sell()
+            results = await self.bot.on_manual_sell(reason="!closeall")
             if results:
                 embed = discord.Embed(title="Liquidation Complete", color=0xFF6600)
                 embed.description = "\n".join(results)
@@ -468,6 +468,11 @@ class OpenClawDiscord(commands.Bot):
         # the time on_ready fires. Guard against on_ready firing again on
         # reconnect — only build the controller once.
         if self.dashboard is None:
+            async def _liquidate_from_dashboard():
+                if not callable(self.on_manual_sell):
+                    raise RuntimeError("liquidation handler not wired up yet")
+                return await self.on_manual_sell(reason="Dashboard")
+
             state = DashboardState(
                 order_manager=self.order_manager,
                 screener=self.screener,
@@ -475,6 +480,7 @@ class OpenClawDiscord(commands.Bot):
                 circuit_breaker=self.circuit_breaker,
                 open_trade_memory=self.open_trade_memory,
                 get_todays_trades=self.get_todays_trades,
+                on_liquidate=_liquidate_from_dashboard,
                 decision_log=self.decision_log,
             )
             self.dashboard = DashboardController(self, state)

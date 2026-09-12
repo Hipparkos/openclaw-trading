@@ -209,18 +209,46 @@ def build_watchlist_embed(screener: Any, settings: dict | None) -> discord.Embed
 
 # ── View (tabs) ───────────────────────────────────────────────────────────────
 
+_LIQUIDATE_IDLE_LABEL = "Liquidation"
+_LIQUIDATE_ARMED_LABEL = "Confirm Liquidation?"
+
+
 class DashboardView(discord.ui.View):
+    """Tabs on row 0; trading controls on row 1. Pause/Resume mutate the
+    shared circuit_breaker dict directly — the same dict main.py's !halt/
+    !resume commands already mutate, so either surface reflects the other.
+    Liquidation needs a second click to confirm: one accidental tap on a
+    phone shouldn't be able to close every position."""
 
     def __init__(self, state: "DashboardState") -> None:
         super().__init__(timeout=None)
         self.state = state
-        self._refresh_styles(state.current_tab)
+        self._liquidation_armed = False
+        self._sync_control_styles(state.current_tab)
 
-    def _refresh_styles(self, active: str) -> None:
+    def _sync_control_styles(self, active_tab: str, *, reset_liquidation: bool = True) -> None:
+        """Keep button appearance honest against live state: highlights the
+        active tab, disables Pause/Resume to match whether trading is
+        currently halted (which may have changed via !halt/!resume rather
+        than these buttons), and — unless told not to — clears any armed
+        liquidation confirmation back to its resting state."""
+        halted = bool(self.state.circuit_breaker and self.state.circuit_breaker.get("halted"))
+        if reset_liquidation:
+            self._liquidation_armed = False
+
         for child in self.children:
-            if isinstance(child, discord.ui.Button):
+            if not isinstance(child, discord.ui.Button):
+                continue
+            if child.custom_id == "dash_pause":
+                child.disabled = halted
+            elif child.custom_id == "dash_resume":
+                child.disabled = not halted
+            elif child.custom_id == "dash_liquidate":
+                if reset_liquidation:
+                    child.label = _LIQUIDATE_IDLE_LABEL
+            else:   # the three tab buttons
                 child.style = (
-                    discord.ButtonStyle.primary if child.label == active
+                    discord.ButtonStyle.primary if child.label == active_tab
                     else discord.ButtonStyle.secondary
                 )
 
@@ -236,20 +264,86 @@ class DashboardView(discord.ui.View):
 
     async def _switch(self, interaction: discord.Interaction, tab: str) -> None:
         self.state.current_tab = tab
-        self._refresh_styles(tab)
+        self._sync_control_styles(tab)
         await interaction.response.edit_message(embed=self.render(), view=self)
 
-    @discord.ui.button(label="Positions", style=discord.ButtonStyle.primary, custom_id="dash_positions")
+    # ── Tabs (row 0) ──────────────────────────────────────────────────────
+
+    @discord.ui.button(label="Positions", style=discord.ButtonStyle.primary, custom_id="dash_positions", row=0)
     async def btn_positions(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self._switch(interaction, "Positions")
 
-    @discord.ui.button(label="Decisions", style=discord.ButtonStyle.secondary, custom_id="dash_decisions")
+    @discord.ui.button(label="Decisions", style=discord.ButtonStyle.secondary, custom_id="dash_decisions", row=0)
     async def btn_decisions(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self._switch(interaction, "Decisions")
 
-    @discord.ui.button(label="Watchlist", style=discord.ButtonStyle.secondary, custom_id="dash_watchlist")
+    @discord.ui.button(label="Watchlist", style=discord.ButtonStyle.secondary, custom_id="dash_watchlist", row=0)
     async def btn_watchlist(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self._switch(interaction, "Watchlist")
+
+    # ── Controls (row 1) ─────────────────────────────────────────────────
+
+    @discord.ui.button(label="Pause", style=discord.ButtonStyle.secondary, custom_id="dash_pause", row=1)
+    async def btn_pause(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if self.state.circuit_breaker is not None:
+            self.state.circuit_breaker["halted"] = True
+        self._sync_control_styles(self.state.current_tab)
+        await interaction.response.edit_message(embed=self.render(), view=self)
+        await interaction.followup.send(
+            "Trading **paused** — no new entries. Open positions are still managed (stops/targets remain active).",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Resume", style=discord.ButtonStyle.success, custom_id="dash_resume", row=1)
+    async def btn_resume(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if self.state.circuit_breaker is not None:
+            self.state.circuit_breaker["halted"] = False
+        self._sync_control_styles(self.state.current_tab)
+        await interaction.response.edit_message(embed=self.render(), view=self)
+        await interaction.followup.send("Trading **resumed** — new entries allowed again.", ephemeral=True)
+
+    @discord.ui.button(label=_LIQUIDATE_IDLE_LABEL, style=discord.ButtonStyle.danger, custom_id="dash_liquidate", row=1)
+    async def btn_liquidate(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not self._liquidation_armed:
+            # First click: arm and wait for a deliberate second click. Any
+            # other button (including the 30s auto-refresh) clears this.
+            self._liquidation_armed = True
+            self._sync_control_styles(self.state.current_tab, reset_liquidation=False)
+            button.label = _LIQUIDATE_ARMED_LABEL
+            await interaction.response.edit_message(embed=self.render(), view=self)
+            return
+
+        # Second click: confirmed. Reset the button before executing so a
+        # slow or failed liquidation can't leave it stuck in "confirm" state.
+        self._liquidation_armed = False
+        button.label = _LIQUIDATE_IDLE_LABEL
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        results: list[str] = []
+        error: str | None = None
+        if callable(self.state.on_liquidate):
+            try:
+                results = await self.state.on_liquidate() or []
+            except Exception as exc:
+                error = str(exc)
+        else:
+            error = "Liquidation handler is not wired up yet."
+
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = False
+        self._sync_control_styles(self.state.current_tab)
+        await interaction.edit_original_response(embed=self.render(), view=self)
+
+        if error:
+            await interaction.followup.send(f"Liquidation failed: {error}", ephemeral=True)
+        elif results:
+            await interaction.followup.send("**Liquidated:**\n" + "\n".join(results), ephemeral=True)
+        else:
+            await interaction.followup.send("No open positions — nothing to liquidate.", ephemeral=True)
 
 
 # ── State + refresh loop ───────────────────────────────────────────────────────
@@ -262,6 +356,7 @@ class DashboardState:
     circuit_breaker: dict | None
     open_trade_memory: dict
     get_todays_trades: Callable[[], list[dict]]
+    on_liquidate: Callable[[], Any] | None = None   # async () -> list[str]; closes every open position
     decision_log: DecisionLog = field(default_factory=DecisionLog)
     current_tab: str = "Positions"
 
@@ -314,6 +409,10 @@ class DashboardController:
         try:
             channel = self.bot.get_channel(self.channel_id) or await self.bot.fetch_channel(self.channel_id)
             message = await channel.fetch_message(self.message_id)
+            # Re-sync Pause/Resume against the live circuit breaker (it can
+            # change via !halt/!resume too) and clear a forgotten liquidation
+            # confirmation rather than leaving it armed indefinitely.
+            self.view._sync_control_styles(self.state.current_tab)
             await message.edit(embed=self.view.render(), view=self.view)
         except discord.NotFound:
             logger.warning("Dashboard message was deleted — stopping refresh loop. Run !dashboard to repost.")
