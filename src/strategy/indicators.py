@@ -31,6 +31,7 @@ class IndicatorCalculator:
 
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
         df = df.dropna(subset=["timestamp"]).set_index("timestamp").sort_index()
+        df = df[~df.index.duplicated(keep="last")]
 
         price_columns = ["open", "high", "low", "close", "volume"]
         df[price_columns] = df[price_columns].astype(float)

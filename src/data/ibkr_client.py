@@ -9,6 +9,13 @@ from strategy.indicators import IndicatorCalculator
 from strategy.logic import StrategyEngine
 
 
+def _upsert_bar(buffer: List[BarData], bar: BarData) -> None:
+    if buffer and buffer[-1].timestamp == bar.timestamp:
+        buffer[-1] = bar
+    else:
+        buffer.append(bar)
+
+
 class IBKRClient:
     # Initialize client - setup IB and settings
     def __init__(self, settings: Dict[str, Any]) -> None:
@@ -112,7 +119,7 @@ class IBKRClient:
                 close=float(bar.close),
                 volume=float(bar.volume),
             )
-            self.data_buffer.setdefault(symbol, {}).setdefault(bar_size, []).append(normalized_bar)
+            _upsert_bar(self.data_buffer.setdefault(symbol, {}).setdefault(bar_size, []), normalized_bar)
             
             self.logger.info(
                 "%s [%s] | O: %s | H: %s | L: %s | C: %s | V: %s", 
@@ -198,7 +205,8 @@ class IBKRClient:
         )
 
         for bar in bars:
-            buffered_bars.append(
+            _upsert_bar(
+                buffered_bars,
                 BarData(
                     symbol=symbol,
                     timestamp=bar.date,
@@ -208,7 +216,7 @@ class IBKRClient:
                     low=float(bar.low),
                     close=float(bar.close),
                     volume=float(bar.volume),
-                )
+                ),
             )
         bars.updateEvent += self._handle_bar_update(symbol, bar_size)
         self._subscriptions.append(bars)
