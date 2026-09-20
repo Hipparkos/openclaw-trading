@@ -166,6 +166,32 @@ class OrderManager:
         )
         return parent_trade, stop_trade
 
+    # Bracket short entry - market SELL-to-open with an attached BUY STOP
+    # (the cover) as the protective stop above entry. Same parent/child
+    # transmit pattern as place_bracket_buy — IBKR only arms the stop once
+    # the SELL fills, so it can never rest naked against a position that
+    # never opened.
+    async def place_bracket_sell(
+        self, symbol: str, quantity: float, stop_price: float
+    ) -> tuple[Any, Any]:
+        contract = await self._qualify_stock(symbol)
+
+        parent = MarketOrder("SELL", quantity, tif="DAY")
+        parent.orderId = self.ib.client.getReqId()
+        parent.transmit = False
+
+        stop = StopOrder("BUY", quantity, stop_price, tif="DAY")
+        stop.orderId = self.ib.client.getReqId()
+        stop.parentId = parent.orderId
+        stop.transmit = True
+
+        parent_trade = self.ib.placeOrder(contract, parent)
+        stop_trade = self.ib.placeOrder(contract, stop)
+        self.logger.info(
+            "Bracket SHORT: %s x%s with attached cover-stop $%.2f", symbol, quantity, stop_price
+        )
+        return parent_trade, stop_trade
+
     # Cancel a resting order - used to clear a protective stop on early exit
     def cancel_order(self, trade: Any) -> None:
         order = getattr(trade, "order", None)

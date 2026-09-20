@@ -553,6 +553,7 @@ class BacktestEngine:
         bars_1h: list[BarData],
         starting_equity: float,
         daily_global_pnl: dict[str, float] | None = None,
+        allow_short: bool = False,
     ) -> tuple[list[TradeRecord], float, int]:
         """
         Sequential bar-by-bar replay.  Fill price is always bar[i+1].open so
@@ -562,6 +563,8 @@ class BacktestEngine:
         trades: list[TradeRecord] = []
         equity = starting_equity
         signals_attempted = 0
+        want_dir = "BEARISH" if allow_short else "BULLISH"
+        oppose_dir = "BULLISH" if allow_short else "BEARISH"
 
         # Open-position state
         in_position = False
@@ -580,7 +583,7 @@ class BacktestEngine:
         # LLM result cache — avoids duplicate calls for identical context strings
         llm_cache: dict[str, tuple[str, float]] = {}
         # Verdict tally — shows why the LLM rejected candidates (pick the right lever)
-        llm_verdicts = {"pass": 0, "bull_low": 0, "neutral": 0, "bearish": 0}
+        llm_verdicts = {"pass": 0, "low_conf": 0, "neutral": 0, "opposite": 0}
         # Per-model tallies — separate openclaw's raw verdict from qwen's veto, so we
         # can tell WHICH model is the wall (openclaw only calls qwen on non-NEUTRAL).
         self._openclaw_tally: dict[str, int] = {}
@@ -776,9 +779,9 @@ class BacktestEngine:
 
                 # Pre-filter: fast indicator vote — avoids LLM call on bars with no activity
                 sig_det, conf_det = self._compute_signal(window_5m, window_1h, cached_df=cached_df, cached_df_1h=df_1h_slice)
-                # Live is long-only: the LLM/news step only runs on BULLISH technical
-                # setups, so mirror that here (BEARISH setups are never entered).
-                if sig_det != "BULLISH":
+                # Mirrors live: this ticker is either long-eligible or short-eligible
+                # for the day (never both), set by the caller via allow_short.
+                if sig_det != want_dir:
                     continue
                 signals_attempted += 1
 
@@ -791,21 +794,18 @@ class BacktestEngine:
                     llm_sig, llm_conf = await self._llm_evaluate(symbol, tech_ctx)
                     llm_cache[tech_ctx] = (llm_sig, llm_conf)
 
-                # Tally the verdict so we can see *why* candidates are rejected:
-                # low-confidence bullish (→ lower the gate) vs neutral/bearish
-                # (→ the model itself is conservative; retrain).
-                if llm_sig == "BULLISH" and llm_conf >= self.LLM_CONF_THRESHOLD:
+                # Tally the verdict so we can see *why* candidates are rejected.
+                if llm_sig == want_dir and llm_conf >= self.LLM_CONF_THRESHOLD:
                     llm_verdicts["pass"] += 1
-                elif llm_sig == "BULLISH":
-                    llm_verdicts["bull_low"] += 1
-                elif llm_sig == "BEARISH":
-                    llm_verdicts["bearish"] += 1
+                elif llm_sig == want_dir:
+                    llm_verdicts["low_conf"] += 1
+                elif llm_sig == oppose_dir:
+                    llm_verdicts["opposite"] += 1
                 else:
                     llm_verdicts["neutral"] += 1
 
-                # No technical-fallback entries — a NEUTRAL/BEARISH or low-confidence
-                # LLM verdict means no trade, exactly like live.
-                if llm_sig != "BULLISH" or llm_conf < self.LLM_CONF_THRESHOLD:
+                # No technical-fallback entries — exactly like live.
+                if llm_sig != want_dir or llm_conf < self.LLM_CONF_THRESHOLD:
                     continue
                 conf = llm_conf
 
@@ -818,7 +818,7 @@ class BacktestEngine:
                     qty = max(1, int(min(risk_shares, max_shares)))
                 else:
                     qty = max(1, int(max_shares))
-                direction = "LONG"
+                direction = "SHORT" if allow_short else "LONG"
                 entry_price = fill_price
                 entry_time = current_time
                 quantity = qty
@@ -862,10 +862,10 @@ class BacktestEngine:
             ))
 
         v = llm_verdicts
-        evaluated = v["pass"] + v["bull_low"] + v["neutral"] + v["bearish"]
+        evaluated = v["pass"] + v["low_conf"] + v["neutral"] + v["opposite"]
         self.logger.info(
-            "%s LLM verdicts on %d candidates | passed=%d | bullish<%.2f=%d | neutral=%d | bearish=%d",
-            symbol, evaluated, v["pass"], self.LLM_CONF_THRESHOLD, v["bull_low"], v["neutral"], v["bearish"],
+            "%s LLM verdicts on %d candidates (want=%s) | passed=%d | low_conf=%d | neutral=%d | opposite=%d",
+            symbol, evaluated, want_dir, v["pass"], v["low_conf"], v["neutral"], v["opposite"],
         )
         oc, qw = self._openclaw_tally, self._qwen_tally
         self.logger.info(
@@ -884,6 +884,7 @@ class BacktestEngine:
         tickers: list[str],
         account_equity: float | None = None,
         duration: str = "3 M",
+        short_tickers: list[str] | tuple[str, ...] = (),
     ) -> BacktestResult:
         start_eq = account_equity if account_equity and account_equity > 0 else self.start_equity
         result = BacktestResult(
@@ -891,6 +892,7 @@ class BacktestEngine:
             tickers=list(tickers),
             duration_days=90,
         )
+        short_set = {s.upper().strip() for s in short_tickers}
 
         self.logger.info(
             "Backtest starting | tickers=%s | duration=%s | equity=%.2f",
@@ -934,10 +936,13 @@ class BacktestEngine:
                 await asyncio.sleep(self.IBKR_SYMBOL_PAUSE)
                 continue
 
-            self.logger.info("Replaying %s (%d bars, LLM active)...", symbol, n5)
+            allow_short = symbol.upper().strip() in short_set
+            self.logger.info("Replaying %s (%d bars, LLM active%s)...",
+                              symbol, n5, ", SHORT" if allow_short else "")
             sym_trades, equity, sig_count = await self._replay_symbol(
                 symbol, bars_5m, bars_1h, equity,
                 daily_global_pnl=daily_global_pnl,
+                allow_short=allow_short,
             )
             result.bars_replayed[symbol] = n5
             result.signals_fired[symbol] = sig_count

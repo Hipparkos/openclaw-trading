@@ -322,45 +322,63 @@ class TradingCommands(commands.Cog):
 
     @commands.command(name="screener")
     async def screener(self, ctx):
-        """Run the volume gainer screener and update trading tickers."""
-        if not self.bot.screener or not self.bot.settings:
+        """Run both the long momentum screener and the short small-cap screener,
+        and update trading tickers. Takes roughly twice as long as a single
+        screen since it's two full-universe scans."""
+        if not self.bot.screener or not self.bot.short_screener or not self.bot.settings:
             await ctx.send("❌ Screener not available. Bot may still be initializing.")
             return
 
         embed = discord.Embed(
-            title="🔍 MOMENTUM SCREENER",
-            description="Scanning the US listed universe for momentum leaders — this takes a few minutes...",
+            title="🔍 SCREENING",
+            description="Scanning the US listed universe for long and short candidates — "
+                        "two full scans, this takes several minutes...",
             color=0x00AAFF,
         )
         status_msg = await ctx.send(embed=embed)
 
         try:
-            screened_tickers = await self.bot.screener.screen()
+            long_tickers = await self.bot.screener.screen()
+            short_tickers = await self.bot.short_screener.screen()
 
-            if not screened_tickers:
+            if not long_tickers and not short_tickers:
                 embed = discord.Embed(
                     title="🔍 SCREENER RESULTS",
-                    description="❌ No stocks met the momentum criteria.",
+                    description="❌ No stocks met either screen's criteria.",
                     color=0xFF6600,
                 )
                 await status_msg.edit(embed=embed)
                 return
 
-            # Update bot's active tickers
-            self.bot.settings["tickers"] = screened_tickers
-            logging.info(f"!screener updated tickers: {screened_tickers}")
+            # Keep whichever side came back empty as-is rather than wiping it.
+            if not long_tickers:
+                long_tickers = [t for t in self.bot.settings["tickers"] if t not in self.bot.short_watchlist]
+            if short_tickers:
+                self.bot.short_watchlist.clear()
+                self.bot.short_watchlist.update(s.upper().strip() for s in short_tickers)
+            else:
+                short_tickers = list(self.bot.short_watchlist)
 
-            # Subscribe IBKR data feeds for any tickers not already buffered
+            combined = list(dict.fromkeys(long_tickers + short_tickers))
+            self.bot.settings["tickers"] = combined
+            logging.info(f"!screener updated tickers ({len(long_tickers)} long, {len(short_tickers)} short): {combined}")
+
             if callable(getattr(self.bot, "on_add_ticker", None)):
-                for t in screened_tickers:
+                for t in combined:
                     asyncio.create_task(self.bot.on_add_ticker(t))
 
-            # Post the full detail table, then clear the "scanning..." placeholder.
-            scr = self.bot.screener
+            long_scr, short_scr = self.bot.screener, self.bot.short_screener
             await self.bot.send_screener_results(
-                getattr(scr, "last_picks", []),
-                getattr(scr, "last_qualified", 0),
-                getattr(scr, "last_scanned", 0),
+                getattr(long_scr, "last_picks", []),
+                getattr(long_scr, "last_qualified", 0),
+                getattr(long_scr, "last_scanned", 0),
+            )
+            await self.bot.send_screener_results(
+                getattr(short_scr, "last_picks", []),
+                getattr(short_scr, "last_qualified", 0),
+                getattr(short_scr, "last_scanned", 0),
+                title="Small-Cap Short Screener — today's watchlist",
+                show_mktcap=True,
             )
             await status_msg.delete()
 
@@ -433,9 +451,11 @@ class OpenClawDiscord(commands.Bot):
         self.on_backtest_stop = None  # set by main after startup
         self._background_tasks: set = set()  # strong refs to prevent GC
         self.screener = None          # set by main after startup
+        self.short_screener = None    # set by main after startup
         self.settings = None          # set by main after startup
         self.circuit_breaker = None   # set by main after startup
         self.open_trade_memory: dict = {}      # set by main after startup (same dict, mutated in place)
+        self.short_watchlist: set = set()      # set by main after startup (same set, mutated in place)
         self.get_todays_trades = lambda: []    # set by main after startup
 
         self.decision_log = DecisionLog()
@@ -482,6 +502,7 @@ class OpenClawDiscord(commands.Bot):
                 get_todays_trades=self.get_todays_trades,
                 on_liquidate=_liquidate_from_dashboard,
                 decision_log=self.decision_log,
+                short_screener=self.short_screener,
             )
             self.dashboard = DashboardController(self, state)
             self.dashboard.register_persistent_view()
@@ -626,8 +647,12 @@ class OpenClawDiscord(commands.Bot):
         
         await channel.send(embed=embed, view=view)
 
-    async def send_screener_results(self, picks: list, qualified: int, scanned: int) -> None:
-        """Post today's momentum watchlist as a monospace table."""
+    async def send_screener_results(
+        self, picks: list, qualified: int, scanned: int,
+        title: str = "Momentum Screener — today's watchlist",
+        show_mktcap: bool = False,
+    ) -> None:
+        """Post today's watchlist as a monospace table."""
         channel = await self._get_target_channel()
         if channel is None:
             logging.error("Screener result suppressed: Discord channel could not be resolved.")
@@ -635,31 +660,37 @@ class OpenClawDiscord(commands.Bot):
 
         if not picks:
             await channel.send(embed=discord.Embed(
-                title="Momentum Screener",
+                title=title.split(" — ")[0],
                 description=f"No stocks met the criteria today ({scanned:,} scanned).",
                 color=0xFF6600,
             ))
             return
 
-        header = f"{'TICKER':<7}{'BMU':>7}{'APTR':>6}{'$VOL':>8}{'EXT':>5}{'<HIGH':>7}  SECTOR"
+        if show_mktcap:
+            header = f"{'TICKER':<7}{'BMU':>7}{'APTR':>6}{'$VOL':>8}{'MKTCAP':>9}  SECTOR"
+        else:
+            header = f"{'TICKER':<7}{'BMU':>7}{'APTR':>6}{'$VOL':>8}{'EXT':>5}{'<HIGH':>7}  SECTOR"
         lines = [header, "-" * len(header)]
         for p in picks:
-            ext = f"{p['extension']:.1f}" if p.get("extension") is not None else "n/a"
-            lines.append(
+            row = (
                 f"{p['symbol']:<7}"
                 f"{p['bmu'] * 100:>+6.1f}%"
                 f"{p['aptr'] * 100:>5.1f}%"
                 f"{p['dollar_volume'] / 1e6:>7.0f}M"
-                f"{ext:>5}"
-                f"{p['pct_from_high'] * 100:>6.1f}%"
-                f"  {str(p.get('sector') or '-')[:14]}"
             )
+            if show_mktcap:
+                row += f"{p.get('market_cap', 0.0) / 1e6:>8.0f}M"
+            else:
+                ext = f"{p['extension']:.1f}" if p.get("extension") is not None else "n/a"
+                row += f"{ext:>5}{p['pct_from_high'] * 100:>6.1f}%"
+            row += f"  {str(p.get('sector') or '-')[:14]}"
+            lines.append(row)
         table = "\n".join(lines)
         if len(table) > 3800:          # embed description cap is 4096
             table = table[:3800] + "\n..."
 
         embed = discord.Embed(
-            title="Momentum Screener — today's watchlist",
+            title=title,
             description=f"```{table}```",
             color=0x00D4B8,
         )

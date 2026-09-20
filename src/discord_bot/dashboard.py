@@ -179,7 +179,18 @@ def build_decisions_embed(decision_log: DecisionLog) -> discord.Embed:
     return embed
 
 
-def build_watchlist_embed(screener: Any, settings: dict | None) -> discord.Embed:
+def _picks_table(picks: list) -> str:
+    header = f"{'SYM':<7}{'BMU':>7}{'APTR':>6}  SECTOR"
+    lines = [header]
+    for p in picks[:20]:
+        lines.append(
+            f"{p['symbol']:<7}{p['bmu'] * 100:>+6.1f}%{p['aptr'] * 100:>5.1f}%  "
+            f"{str(p.get('sector') or '-')[:16]}"
+        )
+    return "\n".join(lines)
+
+
+def build_watchlist_embed(screener: Any, settings: dict | None, short_screener: Any = None) -> discord.Embed:
     embed = discord.Embed(title="Dashboard — Watchlist", color=_COLOR)
     picks = getattr(screener, "last_picks", None) or []
 
@@ -189,21 +200,16 @@ def build_watchlist_embed(screener: Any, settings: dict | None) -> discord.Embed
             "_No screener run recorded yet — showing configured tickers:_\n"
             f"`{', '.join(tickers) if tickers else '(none)'}`"
         )
-        return embed
+    else:
+        embed.description = f"```{_picks_table(picks)}```"
+        qualified = getattr(screener, "last_qualified", 0)
+        scanned = getattr(screener, "last_scanned", 0)
+        embed.set_footer(text=f"{qualified} qualified of {scanned:,} scanned  ·  trading top {len(picks)}")
 
-    header = f"{'SYM':<7}{'BMU':>7}{'APTR':>6}  SECTOR"
-    lines = [header]
-    for p in picks[:20]:
-        lines.append(
-            f"{p['symbol']:<7}{p['bmu'] * 100:>+6.1f}%{p['aptr'] * 100:>5.1f}%  "
-            f"{str(p.get('sector') or '-')[:16]}"
-        )
-    table = "\n".join(lines)
-    embed.description = f"```{table}```"
+    short_picks = getattr(short_screener, "last_picks", None) or []
+    if short_picks:
+        embed.add_field(name="Short candidates", value=f"```{_picks_table(short_picks)}```", inline=False)
 
-    qualified = getattr(screener, "last_qualified", 0)
-    scanned = getattr(screener, "last_scanned", 0)
-    embed.set_footer(text=f"{qualified} qualified of {scanned:,} scanned  ·  trading top {len(picks)}")
     return embed
 
 
@@ -257,7 +263,7 @@ class DashboardView(discord.ui.View):
         if s.current_tab == "Decisions":
             return build_decisions_embed(s.decision_log)
         if s.current_tab == "Watchlist":
-            return build_watchlist_embed(s.screener, s.settings)
+            return build_watchlist_embed(s.screener, s.settings, s.short_screener)
         return build_positions_embed(
             s.order_manager, s.open_trade_memory, s.get_todays_trades(), s.circuit_breaker,
         )
@@ -359,6 +365,7 @@ class DashboardState:
     on_liquidate: Callable[[], Any] | None = None   # async () -> list[str]; closes every open position
     decision_log: DecisionLog = field(default_factory=DecisionLog)
     current_tab: str = "Positions"
+    short_screener: Any = None
 
 
 class DashboardController:

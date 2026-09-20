@@ -7,7 +7,7 @@ import sys
 import math
 from datetime import datetime, timedelta, timezone, date
 from logging.handlers import RotatingFileHandler
-from data.screener import MomentumScreener
+from data.screener import MomentumScreener, SmallCapShortScreener
 from execution.order_manager import OrderManager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -196,19 +196,24 @@ async def main() -> None:
         logger.error(e)
         sys.exit(1)
 
-    # Fast, non-blocking startup: use today's cached screen if present, otherwise the
-    # settings.yaml fallback — so Discord and IBKR come online immediately. The full
-    # (multi-minute) universe scan is deferred to the daily re-screen in the main loop,
-    # which only fires once Discord is online.
-    screener = MomentumScreener()
-    screened_tickers = screener._cached_today()   # instant — reads cache file, no scan
 
-    if screened_tickers:
-        settings["tickers"] = screened_tickers
-        logger.info(f"Using today's cached screen: {screened_tickers}")
+    screener = MomentumScreener()
+    short_screener = SmallCapShortScreener()
+    short_watchlist: set[str] = set()
+
+    screened_tickers = screener._cached_today()
+    short_screened = short_screener._cached_today()
+    if short_screened:
+        short_watchlist.update(s.upper().strip() for s in short_screened)
+
+    combined_cached = list(dict.fromkeys((screened_tickers or []) + (short_screened or [])))
+    if combined_cached:
+        settings["tickers"] = combined_cached
+        logger.info("Using today's cached screens: %d long, %d short.",
+                    len(screened_tickers or []), len(short_screened or []))
     else:
         logger.info(
-            "No fresh screen yet — starting on fallback tickers %s; momentum scan runs once Discord is online.",
+            "No fresh screens yet — starting on fallback tickers %s; scans run once Discord is online.",
             settings.get("tickers", []),
         )
 
@@ -217,8 +222,9 @@ async def main() -> None:
     news_client = NewsClient()
     discord_ui = OpenClawDiscord(order_manager)
 
-    # Attach screener and settings to Discord bot for !screener command
+    # Attach screeners and settings to Discord bot for !screener command
     discord_ui.screener = screener
+    discord_ui.short_screener = short_screener
     discord_ui.settings = settings
 
     async def _subscribe_if_new(symbol: str) -> None:
@@ -258,6 +264,7 @@ async def main() -> None:
             result = await backtest_engine.run(
                 tickers=tickers,
                 account_equity=account_equity if account_equity > 0 else None,
+                short_tickers=list(short_watchlist),
             )
             await discord_ui.send_backtest_result(result, channel_id=channel_id)
         except Exception as exc:
@@ -313,9 +320,9 @@ async def main() -> None:
     SCREEN_HOUR_ET = 9            # daily re-screen fires from 09:00 ET (pre-open)
     eod_recap_sent_date: Optional[date] = None
     eod_liquidation_done_date: Optional[date] = None
-    # If the startup screen produced a list, mark today as done so the loop doesn't
-    # immediately re-scan; if it came back empty, leave it unset so the loop retries.
-    screened_date: Optional[date] = _now_et().date() if screened_tickers else None
+    # If the startup screens produced a list, mark today as done so the loop doesn't
+    # immediately re-scan; if either came back empty, leave it unset so the loop retries.
+    screened_date: Optional[date] = _now_et().date() if (screened_tickers and short_screened) else None
 
     app.state.client = client
     app.state.settings = settings
@@ -459,6 +466,7 @@ async def main() -> None:
     discord_ui.on_manual_sell = liquidate_all_positions
     discord_ui.circuit_breaker = circuit_breaker
     discord_ui.open_trade_memory = open_trade_memory   # same dict, mutated in place
+    discord_ui.short_watchlist = short_watchlist       # same set, mutated in place
     discord_ui.get_todays_trades = _todays_trades
 
     try:
@@ -598,6 +606,7 @@ async def main() -> None:
                 current_price: float,
                 current_atr: float,
                 confidence: float,
+                allow_short: bool = False,
             ) -> None:
                 # Gate all order execution to regular market hours only.
                 if not is_market_open():
@@ -611,6 +620,7 @@ async def main() -> None:
                 symbol_key = symbol.upper().strip()
                 holding_quantity = order_manager.get_position(symbol)
                 is_holding = holding_quantity != 0.0
+                is_short_position = holding_quantity < 0.0
 
                 if signal_direction == "BULLISH" and not is_holding:
                     if circuit_breaker["halted"]:
@@ -711,6 +721,7 @@ async def main() -> None:
                         "entry_confidence": confidence,
                         "stop_order": stop_trade,
                         "partial_taken": False,
+                        "is_long": True,
                     }
                     # Report the stop/target actually in force, not a hardcoded %: the
                     # resting stop is at stop_price, TP1 is entry + 3 × entry-ATR.
@@ -730,14 +741,116 @@ async def main() -> None:
                     logger.info("BUY filled: %s x%d.", symbol, trade_size)
                     return
 
+                # ── Open a SHORT from flat (small-cap short candidates only) ──
+                if signal_direction == "BEARISH" and not is_holding and allow_short:
+                    if circuit_breaker["halted"]:
+                        logger.info("Circuit breaker on — no SHORT for %s.", symbol)
+                        return
+                    if datetime.now(_ET).hour == 9:
+                        logger.info("%s: SHORT skipped (opening 30-min filter).", symbol)
+                        return
+                    if _is_pre_close():
+                        logger.info("%s: SHORT skipped (pre-close window).", symbol)
+                        return
+
+                    last_buy = last_buy_time.get(symbol_key)
+                    last_sell = last_sell_time.get(symbol_key)
+                    if last_buy and now - last_buy < timedelta(minutes=15):
+                        logger.info("%s: SHORT skipped (cooldown).", symbol)
+                        return
+                    if last_sell and now - last_sell < timedelta(minutes=15):
+                        logger.info("%s: SHORT skipped (recent trade cooldown).", symbol)
+                        return
+                    if current_price <= 0.0:
+                        logger.warning("%s: SHORT skipped — no valid price yet.", symbol)
+                        return
+
+                    account_equity = order_manager.get_account_equity()
+                    gross_exposure = order_manager.get_gross_position_value()
+                    if account_equity > 0.0 and gross_exposure >= MAX_GROSS_EXPOSURE_PCT * account_equity:
+                        logger.info(
+                            "%s: SHORT skipped — open exposure %.0f%% ≥ %.0f%% cap.",
+                            symbol, (gross_exposure / account_equity) * 100, MAX_GROSS_EXPOSURE_PCT * 100,
+                        )
+                        return
+
+                    max_shares = (account_equity * MAX_POSITION_PCT) / current_price if account_equity > 0.0 else 0.0
+                    if account_equity > 0.0 and current_atr > 0.0:
+                        risk_shares = (account_equity * RISK_PER_TRADE) / (STOP_ATR_MULT * current_atr)
+                        trade_size = max(1, int(min(risk_shares, max_shares)))
+                    else:
+                        trade_size = max(1, int(max_shares))
+                    logger.info(
+                        "%s SHORT sizing | equity $%.2f | ATR $%.3f | risk %.1f%% | cap %.0f%% | shares → %d",
+                        symbol, account_equity, current_atr, RISK_PER_TRADE * 100,
+                        MAX_POSITION_PCT * 100, trade_size,
+                    )
+
+                    # Cover-stop sits ABOVE entry — a short loses money as price rises.
+                    if current_price > 0.0 and current_atr > 0.0:
+                        stop_price = round(current_price + STOP_ATR_MULT * current_atr, 2)
+                    elif current_price > 0.0:
+                        stop_price = round(current_price * (1 + STOP_LOSS_PCT), 2)
+                    else:
+                        stop_price = 0.0
+                    stop_trade = None
+                    if stop_price > 0.0:
+                        try:
+                            _, stop_trade = await order_manager.place_bracket_sell(
+                                symbol, trade_size, stop_price
+                            )
+                            logger.info("SHORT %s x%d with resting cover-stop at $%.2f.",
+                                        symbol, trade_size, stop_price)
+                        except Exception as exc:
+                            logger.warning("Bracket SHORT failed for %s: %s — using plain market order.",
+                                           symbol, exc)
+                            await order_manager.execute_trade(symbol, "SELL", trade_size)
+                    else:
+                        await order_manager.execute_trade(symbol, "SELL", trade_size)
+
+                    last_buy_time[symbol_key] = now
+
+                    open_trade_memory[symbol_key] = {
+                        "technical_context": technical_context,
+                        "prediction": signal_direction,
+                        "entry_price": current_price,
+                        "entry_time": now,
+                        "quantity": trade_size,
+                        "lowest_price_seen": current_price,
+                        "initial_atr": current_atr,
+                        "entry_confidence": confidence,
+                        "stop_order": stop_trade,
+                        "partial_taken": False,
+                        "is_long": False,
+                    }
+                    stop_loss = stop_price if stop_price > 0.0 else "N/A"
+                    target_price = (current_price - TAKE_PROFIT_ATR_MULT * current_atr) \
+                        if (current_price > 0.0 and current_atr > 0.0) else "N/A"
+                    await discord_ui.send_execution_alert(
+                        symbol=symbol,
+                        action="SELL SHORT",
+                        confidence=confidence,
+                        market_story=technical_context,
+                        entry_price=current_price,
+                        target_price=target_price,
+                        stop_loss=stop_loss,
+                        quantity=trade_size,
+                    )
+                    logger.info("SHORT filled: %s x%d.", symbol, trade_size)
+                    return
+
                 if is_holding:
                     trade_memory = open_trade_memory.get(symbol_key)
                     entry_price = 0.0
+                    # A trade_memory-less position (e.g. after a restart) has no
+                    # recorded direction — fall back to the live position sign.
+                    is_long_pos = holding_quantity > 0.0
                     if trade_memory is not None:
                         try:
                             entry_price = float(trade_memory.get("entry_price", 0.0))
                         except (TypeError, ValueError):
                             entry_price = 0.0
+                        is_long_pos = bool(trade_memory.get("is_long", is_long_pos))
 
                     # Fallback stop only — when no resting broker stop is active (e.g. it
                     # failed to place). Normally the broker's resting stop handles the
@@ -745,31 +858,41 @@ async def main() -> None:
                     has_resting_stop = bool(trade_memory and trade_memory.get("stop_order") is not None)
                     mem_atr = float(trade_memory.get("initial_atr", 0.0)) if trade_memory else 0.0
                     if entry_price > 0.0 and current_price > 0.0 and not has_resting_stop:
-                        stop_level = (entry_price - STOP_ATR_MULT * mem_atr) if mem_atr > 0.0 \
-                            else entry_price * (1 - STOP_LOSS_PCT)
-                        if current_price <= stop_level:
-                            loss_pct = ((entry_price - current_price) / entry_price) * 100.0
+                        if is_long_pos:
+                            stop_level = (entry_price - STOP_ATR_MULT * mem_atr) if mem_atr > 0.0 \
+                                else entry_price * (1 - STOP_LOSS_PCT)
+                            triggered = current_price <= stop_level
+                        else:
+                            stop_level = (entry_price + STOP_ATR_MULT * mem_atr) if mem_atr > 0.0 \
+                                else entry_price * (1 + STOP_LOSS_PCT)
+                            triggered = current_price >= stop_level
+                        if triggered:
+                            loss_pct = abs(current_price - entry_price) / entry_price * 100.0
                             sell_quantity = max(1, int(abs(holding_quantity)))
+                            close_action = "SELL" if is_long_pos else "BUY"
                             logger.warning(
-                                "Fallback stop-loss: %s | entry $%.2f → now $%.2f (−%.2f%%) | selling %d.",
-                                symbol, entry_price, current_price, loss_pct, sell_quantity,
+                                "Fallback stop-loss: %s | entry $%.2f → now $%.2f (−%.2f%%) | %s %d.",
+                                symbol, entry_price, current_price, loss_pct, close_action.lower(), sell_quantity,
                             )
 
-                            await order_manager.execute_trade(symbol, "SELL", sell_quantity)
+                            await order_manager.execute_trade(symbol, close_action, sell_quantity)
                             last_sell_time[symbol_key] = now
 
                             stopped_trade_memory = open_trade_memory.pop(symbol_key, None)
                             await _finalize_close(
                                 symbol, stopped_trade_memory, entry_price, current_price, sell_quantity,
-                                "ATR stop (fallback)", signal_direction, holding_quantity > 0, technical_context,
+                                "ATR stop (fallback)", signal_direction, is_long_pos, technical_context,
                             )
                             logger.info("Closed %s x%d — ATR stop (fallback).", symbol, sell_quantity)
                             return
 
-                if signal_direction == "BEARISH" and is_holding:
+                # ── Reversal exit: BEARISH closes a LONG, BULLISH covers a SHORT ──
+                exits_long = signal_direction == "BEARISH" and is_holding and not is_short_position
+                covers_short = signal_direction == "BULLISH" and is_holding and is_short_position
+                if exits_long or covers_short:
                     last_buy = last_buy_time.get(symbol_key)
                     if last_buy and now - last_buy < timedelta(minutes=MIN_HOLD_MINUTES):
-                        logger.info("%s: SELL skipped (min hold not met).", symbol)
+                        logger.info("%s: exit skipped (min hold not met).", symbol)
                         return
 
                     sell_quantity = max(1, int(abs(holding_quantity)))
@@ -777,14 +900,16 @@ async def main() -> None:
                     trade_memory = open_trade_memory.pop(symbol_key, None)
                     _cancel_resting_stop(trade_memory)
 
-                    await order_manager.execute_trade(symbol, "SELL", sell_quantity)
+                    close_action = "SELL" if exits_long else "BUY"
+                    await order_manager.execute_trade(symbol, close_action, sell_quantity)
                     last_sell_time[symbol_key] = now
                     entry_price_mem = float(trade_memory.get("entry_price", 0.0)) if trade_memory else 0.0
+                    reason = "AI bearish signal" if exits_long else "AI bullish signal (short cover)"
                     await _finalize_close(
                         symbol, trade_memory, entry_price_mem, current_price, sell_quantity,
-                        "AI bearish signal", signal_direction, holding_quantity > 0, technical_context,
+                        reason, signal_direction, exits_long, technical_context,
                     )
-                    logger.info("Closed %s x%d — AI bearish signal.", symbol, sell_quantity)
+                    logger.info("Closed %s x%d — %s.", symbol, sell_quantity, reason)
                     return
 
                 logger.info(
@@ -815,18 +940,39 @@ async def main() -> None:
                 if (screened_date != today_et and now_et.weekday() < 5
                         and now_et.hour >= SCREEN_HOUR_ET and discord_online):
                     screened_date = today_et
-                    logger.info("Daily re-screen — scanning for today's momentum leaders...")
+                    logger.info("Daily re-screen — scanning for today's long and short candidates...")
                     try:
                         fresh = await screener.screen()
+                        fresh_short = await short_screener.screen()
+
                         if fresh:
-                            settings["tickers"] = fresh
-                            logger.info("Watchlist updated (%d tickers): %s", len(fresh), fresh)
                             for sym in fresh:
                                 await _subscribe_if_new(sym)
                         else:
-                            logger.warning("Re-screen returned nothing — keeping current watchlist.")
+                            logger.warning("Long re-screen returned nothing — keeping current long list.")
+                            fresh = [t for t in settings["tickers"] if t.upper().strip() not in short_watchlist]
+
+                        if fresh_short:
+                            short_watchlist.clear()
+                            short_watchlist.update(s.upper().strip() for s in fresh_short)
+                            for sym in fresh_short:
+                                await _subscribe_if_new(sym)
+                        else:
+                            logger.warning("Short re-screen returned nothing — keeping current short list.")
+                            fresh_short = list(short_watchlist)
+
+                        combined = list(dict.fromkeys(fresh + fresh_short))
+                        if combined:
+                            settings["tickers"] = combined
+                            logger.info("Watchlist updated (%d long, %d short): %s",
+                                        len(fresh), len(fresh_short), combined)
+
                         await discord_ui.send_screener_results(
                             screener.last_picks, screener.last_qualified, screener.last_scanned,
+                        )
+                        await discord_ui.send_screener_results(
+                            short_screener.last_picks, short_screener.last_qualified, short_screener.last_scanned,
+                            title="Small-Cap Short Screener — today's watchlist", show_mktcap=True,
                         )
                     except Exception as exc:
                         logger.exception("Daily re-screen failed: %s", exc)
@@ -844,7 +990,7 @@ async def main() -> None:
                     await liquidate_all_positions(reason="End-of-Day")
                     eod_liquidation_done_date = today_et
 
-                scan = {"held": 0, "bull_setup": 0, "hourly_neutral": 0}
+                scan = {"held": 0, "bull_setup": 0, "bear_setup": 0, "hourly_neutral": 0}
                 # Snapshot the list so a Discord !add or a re-screen mid-cycle can't
                 # disrupt iteration; new tickers are picked up on the next pass.
                 # Open positions are always included even if the daily re-screen
@@ -867,6 +1013,8 @@ async def main() -> None:
                         scan["held"] += 1
                     if tech_dir == "BULLISH":
                         scan["bull_setup"] += 1
+                    elif tech_dir == "BEARISH":
+                        scan["bear_setup"] += 1
                     if hourly_direction == "NEUTRAL":
                         scan["hourly_neutral"] += 1
 
@@ -884,6 +1032,7 @@ async def main() -> None:
                                 stop_filled = False
                         if stop_filled:
                             open_trade_memory.pop(symbol_key, None)
+                            is_long_pos = bool(pending_mem.get("is_long", True))
                             entry_price = float(pending_mem.get("entry_price", 0.0))
                             entry_time_mem = pending_mem.get("entry_time")
                             entry_conf = float(pending_mem.get("entry_confidence", 0.0))
@@ -894,21 +1043,24 @@ async def main() -> None:
                             except Exception:
                                 fill_px = 0.0
                             # After TP1 the resting stop sits at breakeven (entry); before
-                            # it, at entry − STOP_ATR_MULT × ATR (fixed 2% if ATR unknown).
+                            # it, STOP_ATR_MULT × ATR beyond entry (fixed 2% if ATR unknown).
                             mem_atr = float(pending_mem.get("initial_atr", 0.0))
                             if was_partial:
                                 stop_ref = entry_price
                             elif mem_atr > 0.0:
-                                stop_ref = entry_price - STOP_ATR_MULT * mem_atr
+                                stop_ref = (entry_price - STOP_ATR_MULT * mem_atr) if is_long_pos \
+                                    else (entry_price + STOP_ATR_MULT * mem_atr)
                             else:
-                                stop_ref = entry_price * (1 - STOP_LOSS_PCT)
+                                stop_ref = entry_price * (1 - STOP_LOSS_PCT) if is_long_pos \
+                                    else entry_price * (1 + STOP_LOSS_PCT)
                             exit_px = fill_px if fill_px > 0.0 else (stop_ref if entry_price > 0.0 else current_price)
                             last_sell_time[symbol_key] = datetime.now(timezone.utc)
                             await _finalize_close(
                                 symbol, pending_mem, entry_price, exit_px, closed_qty,
                                 ("Breakeven stop (resting order filled)" if was_partial
                                  else "ATR stop (resting order filled)"),
-                                "BULLISH", True, str(pending_mem.get("technical_context", "")),
+                                pending_mem.get("prediction", "BULLISH"), is_long_pos,
+                                str(pending_mem.get("technical_context", "")),
                             )
                             logger.info("Resting stop filled for %s x%d — %s.", symbol, closed_qty,
                                         "breakeven" if was_partial else "ATR stop")
@@ -918,14 +1070,19 @@ async def main() -> None:
                     if is_holding:
                         trade_memory = open_trade_memory.get(symbol_key)
                         if trade_memory is not None:
+                            is_long_pos = bool(trade_memory.get("is_long", True))
+                            extreme_key = "highest_price_seen" if is_long_pos else "lowest_price_seen"
                             try:
-                                highest_price_seen = float(trade_memory.get("highest_price_seen", trade_memory.get("entry_price", current_price)))
+                                extreme_price = float(trade_memory.get(extreme_key, trade_memory.get("entry_price", current_price)))
                             except (TypeError, ValueError):
-                                highest_price_seen = float(trade_memory.get("entry_price", current_price) or current_price)
+                                extreme_price = float(trade_memory.get("entry_price", current_price) or current_price)
 
-                            if current_price > highest_price_seen:
-                                trade_memory["highest_price_seen"] = current_price
-                                highest_price_seen = current_price
+                            if is_long_pos and current_price > extreme_price:
+                                trade_memory[extreme_key] = current_price
+                                extreme_price = current_price
+                            elif not is_long_pos and current_price < extreme_price:
+                                trade_memory[extreme_key] = current_price
+                                extreme_price = current_price
 
                             try:
                                 entry_price = float(trade_memory.get("entry_price", 0.0))
@@ -943,22 +1100,31 @@ async def main() -> None:
                             # so the distance can't widen mid-trade — mirrors the backtest.
                             # After the TP1 scale-out the trail is floored at breakeven so
                             # the runner can never give back into a loss.
-                            trailing_stop_level = highest_price_seen - (ATR_TRAIL_MULT * initial_atr)
-                            if trade_memory.get("partial_taken"):
-                                trailing_stop_level = max(trailing_stop_level, entry_price)
-                            if initial_atr > 0.0 and current_price > 0.0 and current_price <= trailing_stop_level:
+                            if is_long_pos:
+                                trailing_stop_level = extreme_price - (ATR_TRAIL_MULT * initial_atr)
+                                if trade_memory.get("partial_taken"):
+                                    trailing_stop_level = max(trailing_stop_level, entry_price)
+                                trail_hit = current_price <= trailing_stop_level
+                            else:
+                                trailing_stop_level = extreme_price + (ATR_TRAIL_MULT * initial_atr)
+                                if trade_memory.get("partial_taken"):
+                                    trailing_stop_level = min(trailing_stop_level, entry_price)
+                                trail_hit = current_price >= trailing_stop_level
+                            if initial_atr > 0.0 and current_price > 0.0 and trail_hit:
                                 sell_quantity = max(1, int(abs(holding_quantity)))
+                                close_action = "SELL" if is_long_pos else "BUY"
                                 logger.warning("ATR trailing stop hit: %s.", symbol)
 
                                 # Cancel the protective stop before closing so the two can't both fill.
                                 stopped_trade_memory = open_trade_memory.pop(symbol_key, None)
                                 _cancel_resting_stop(stopped_trade_memory)
 
-                                await order_manager.execute_trade(symbol, "SELL", sell_quantity)
+                                await order_manager.execute_trade(symbol, close_action, sell_quantity)
                                 last_sell_time[symbol_key] = datetime.now(timezone.utc)
                                 await _finalize_close(
                                     symbol, stopped_trade_memory, entry_price, current_price, sell_quantity,
-                                    "ATR trailing stop", "BULLISH", holding_quantity > 0, technical_context,
+                                    "ATR trailing stop", trade_memory.get("prediction", "BULLISH"),
+                                    is_long_pos, technical_context,
                                 )
                                 logger.info("Closed %s x%d — ATR trailing stop.", symbol, sell_quantity)
                                 continue
@@ -973,18 +1139,23 @@ async def main() -> None:
                             )
                             partial_taken = bool(trade_memory.get("partial_taken", False))
                             tp_mult = TAKE_PROFIT_2_ATR_MULT if partial_taken else TAKE_PROFIT_ATR_MULT
-                            take_profit_level = entry_price + (tp_mult * initial_atr)
-                            if (held_long_enough and entry_price > 0.0 and initial_atr > 0.0
-                                    and current_price >= take_profit_level):
+                            if is_long_pos:
+                                take_profit_level = entry_price + (tp_mult * initial_atr)
+                                tp_hit = current_price >= take_profit_level
+                            else:
+                                take_profit_level = entry_price - (tp_mult * initial_atr)
+                                tp_hit = current_price <= take_profit_level
+                            if held_long_enough and entry_price > 0.0 and initial_atr > 0.0 and tp_hit:
                                 full_qty = max(1, int(abs(holding_quantity)))
                                 scale_qty = int(full_qty * SCALE_OUT_PCT)
+                                close_action = "SELL" if is_long_pos else "BUY"
 
                                 # ── TP1: scale out 60%, keep a runner, stop → breakeven ──
                                 if not partial_taken and scale_qty >= 1 and (full_qty - scale_qty) >= 1:
                                     remaining = full_qty - scale_qty
                                     logger.warning("Take-profit 1 hit: %s — scaling out %d/%d.", symbol, scale_qty, full_qty)
 
-                                    await order_manager.execute_trade(symbol, "SELL", scale_qty)
+                                    await order_manager.execute_trade(symbol, close_action, scale_qty)
                                     last_sell_time[symbol_key] = datetime.now(timezone.utc)
 
                                     # Replace the protective stop with a breakeven stop on the runner.
@@ -992,7 +1163,7 @@ async def main() -> None:
                                     breakeven_stop = None
                                     try:
                                         breakeven_stop = await order_manager.place_stop_order(
-                                            symbol, "SELL", remaining, round(entry_price, 2)
+                                            symbol, close_action, remaining, round(entry_price, 2)
                                         )
                                     except Exception as exc:
                                         logger.warning("Could not place breakeven stop for %s: %s", symbol, exc)
@@ -1005,7 +1176,7 @@ async def main() -> None:
                                                          symbol=symbol, entry_time=entry_time_tp)
                                     await discord_ui.send_close_alert(
                                         symbol=symbol,
-                                        is_long=holding_quantity > 0,
+                                        is_long=is_long_pos,
                                         entry_price=entry_price,
                                         exit_price=current_price,
                                         quantity=scale_qty,
@@ -1013,7 +1184,8 @@ async def main() -> None:
                                         exit_reason="Partial take-profit (60%) — stop to breakeven",
                                         market_story=technical_context,
                                     )
-                                    logger.info("Partial TP: %s sold %d, runner %d on breakeven stop.", symbol, scale_qty, remaining)
+                                    logger.info("Partial TP: %s %s %d, runner %d on breakeven stop.",
+                                                symbol, "sold" if is_long_pos else "covered", scale_qty, remaining)
                                     continue
 
                                 # ── TP2 (or position too small to split): close the remainder ──
@@ -1022,11 +1194,12 @@ async def main() -> None:
                                 stopped_trade_memory = open_trade_memory.pop(symbol_key, None)
                                 _cancel_resting_stop(stopped_trade_memory)
 
-                                await order_manager.execute_trade(symbol, "SELL", sell_quantity)
+                                await order_manager.execute_trade(symbol, close_action, sell_quantity)
                                 last_sell_time[symbol_key] = datetime.now(timezone.utc)
                                 await _finalize_close(
                                     symbol, stopped_trade_memory, entry_price, current_price, sell_quantity,
-                                    "Take-profit target met (runner)", "BULLISH", holding_quantity > 0, technical_context,
+                                    "Take-profit target met (runner)", trade_memory.get("prediction", "BULLISH"),
+                                    is_long_pos, technical_context,
                                 )
                                 logger.info("Closed %s x%d — take-profit 2.", symbol, sell_quantity)
                                 continue
@@ -1039,10 +1212,12 @@ async def main() -> None:
                     # what stops a single held name from monopolising the CPU and
                     # starving the rest of the watchlist.
                     if is_holding:
-                        if tech_dir == "BEARISH":
+                        held_is_short = holding_quantity < 0.0
+                        reversal_signal = "BULLISH" if held_is_short else "BEARISH"
+                        if tech_dir == reversal_signal:
                             await _route_trade(
                                 symbol=symbol,
-                                signal_direction="BEARISH",
+                                signal_direction=reversal_signal,
                                 technical_context=technical_context,
                                 current_price=current_price,
                                 current_atr=current_atr,
@@ -1052,8 +1227,12 @@ async def main() -> None:
 
                     # Flat: the technical gate must qualify before we spend any LLM/news
                     # call. Flat-with-no-setup tickers are skipped cheaply, so the whole
-                    # watchlist stays responsive every cycle.
-                    if tech_dir != "BULLISH":
+                    # watchlist stays responsive every cycle. Short-watchlist tickers want
+                    # a bearish setup instead of a bullish one — everything else here is
+                    # direction-neutral and reused as-is.
+                    is_short_candidate = symbol_key in short_watchlist
+                    want_tech_dir = "BEARISH" if is_short_candidate else "BULLISH"
+                    if tech_dir != want_tech_dir:
                         continue
 
                     news_items = await news_client.fetch_latest_news(symbol, technical_context=technical_context)
@@ -1081,38 +1260,37 @@ async def main() -> None:
                         llm_conf = float(prediction.get("confidence", 0.0))
 
                     # The LLM is the decision maker — no technical-fallback entries.
-                    # Technicals qualify the candidate; only a confident BULLISH
-                    # verdict from the LLM opens a position (mirrors the backtest).
                     # Dashboard decision log — only candidates that cleared the technical
                     # gate and reached an LLM verdict are worth recording; the routine
                     # "no setup" rejections that fire every cycle for most of the
                     # watchlist would just drown these out.
-                    gate_label = f"BULL {tech_conf:.2f}"
+                    gate_label = f"{'BEAR' if is_short_candidate else 'BULL'} {tech_conf:.2f}"
 
-                    if llm_dir != "BULLISH":
+                    if llm_dir != want_tech_dir:
                         logger.info("%s: entry skipped — LLM verdict %s.", symbol, llm_dir)
                         discord_ui.decision_log.record(symbol, gate_label, f"{llm_dir} {llm_conf:.2f}", "llm veto")
                         continue
                     if llm_conf < LLM_CONF_THRESHOLD:
                         logger.info("%s: entry skipped — LLM confidence %.2f < %.2f.",
                                     symbol, llm_conf, LLM_CONF_THRESHOLD)
-                        discord_ui.decision_log.record(symbol, gate_label, f"BULL {llm_conf:.2f}", "low confidence")
+                        discord_ui.decision_log.record(symbol, gate_label, f"{want_tech_dir[:4]} {llm_conf:.2f}", "low confidence")
                         continue
 
-                    discord_ui.decision_log.record(symbol, gate_label, f"BULL {llm_conf:.2f}", "entered")
+                    discord_ui.decision_log.record(symbol, gate_label, f"{want_tech_dir[:4]} {llm_conf:.2f}", "entered")
                     await _route_trade(
                         symbol=symbol,
-                        signal_direction="BULLISH",
+                        signal_direction=want_tech_dir,
                         technical_context=technical_context,
                         current_price=current_price,
                         current_atr=current_atr,
                         confidence=llm_conf,
+                        allow_short=is_short_candidate,
                     )
 
                 if not settings.get("backtest_mode"):
                     logger.info(
-                        "Scan: %d tickers | %d held | %d bullish setups | %d hourly-NEUTRAL (no 1h SMA-50?)",
-                        len(active_tickers), scan["held"], scan["bull_setup"], scan["hourly_neutral"],
+                        "Scan: %d tickers | %d held | %d bullish | %d bearish setups | %d hourly-NEUTRAL (no 1h SMA-50?)",
+                        len(active_tickers), scan["held"], scan["bull_setup"], scan["bear_setup"], scan["hourly_neutral"],
                     )
 
                 # Sleep in 5-second increments so backtest_mode is noticed within 5 s

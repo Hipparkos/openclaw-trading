@@ -36,14 +36,8 @@ class MomentumScreener:
     then trades the FINAL_N strongest by BMU.
     """
 
-    # ── Screen configuration ───────────────────────────────────────────────
-    # Median, not mean, and over a long window: a single pump day (e.g. XHG, +350%
-    # on 86M shares with a few thousand on either side) carries a short mean over
-    # the threshold on its own. A median needs HALF the window to be liquid.
     DOLLAR_VOL_PERIOD = 20
     DOLLAR_VOL_MIN = 100_000_000
-    # Reject names whose recent history contains a blow-off day — momentum should
-    # be built over weeks, not printed in one session.
     SPIKE_LOOKBACK = 60
     MAX_SINGLE_DAY_MOVE = 0.50
     APTR_PERIOD = 14
@@ -51,31 +45,38 @@ class MomentumScreener:
     BMU_PERIOD = 60
     BMU_MIN = 0.30
     NOT_AT_HIGHS_PERIOD = 30
-    MUST_BE_ABOVE_10SMA = True
+    ENABLE_TREND_FILTER = True
     MAX_50SMA_EXTENSION_APTRS = 10
     IPO_MIN_BARS = 30
     IPO_APTR_MULT = 0.7
     IPO_BMU_MULT = 0.5
-    TOP_N = 150          # qualified momentum-leader pool (ranked by dollar volume)
-    FINAL_N = 25         # how many the bot actually trades (strongest by BMU)
-    INCLUDE_ETFS = False # common stock only — leveraged ETFs (SOXS, MSTU, AAPU…) excluded
+    TOP_N = 150
+    FINAL_N = 20
+    INCLUDE_ETFS = False
+    ENABLE_SPIKE_GUARD = True
+    TREND_MODE = "above"
+    REQUIRE_NOT_AT_HIGHS = True
+    EXTENSION_MODE = "max"
+    MIN_50SMA_EXTENSION_APTRS = 6.0
+    PRICE_MIN: float | None = None
+    PRICE_MAX: float | None = None
+    MIN_MARKET_CAP: float | None = None
+    MAX_MARKET_CAP: float | None = None
+    PICK_DIRECTION = "LONG"
+    BMU_MODE = "cumulative"   # "cumulative" (% gain over BMU_PERIOD) or
+                              # "max_single_day" (biggest single-day move in BMU_PERIOD)
+    MIN_VOLUME_RATIO: float | None = None   # latest bar's volume vs its 20-day average
 
     # ── Scan mechanics ─────────────────────────────────────────────────────
-    BATCH_SIZE = 150     # symbols per yfinance download call
+    BATCH_SIZE = 150
     HISTORY_PERIOD = "6mo"
-    SMA50_MIN_BARS = 50      # bars needed before the 50SMA extension check applies
+    SMA50_MIN_BARS = 50
 
     _NASDAQ_LISTED = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
     _OTHER_LISTED = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
 
-    # otherlisted.txt covers every non-NASDAQ venue. Keep NYSE (N) and NYSE ARCA
-    # (P); drop NYSE American (A), Cboe BZX (Z) and IEX (V) — the paper account
-    # cannot reliably route to those and they carry the thinnest listings.
     _OTHER_EXCHANGES_ALLOWED = {"N", "P"}
 
-    # The ETF column misses ETNs, closed-end funds, preferreds and debt issues,
-    # so the security name is screened too. Word-boundary matched so real
-    # companies ("United…", "Fundamental…") are not caught.
     _NAME_EXCLUDE = re.compile(
         r"\b(etf|etn|fund|funds|depositary|preferred|pfd|warrants?|units?|"
         r"rights?|notes?|debentures?|bonds?)\b",
@@ -86,22 +87,14 @@ class MomentumScreener:
         self.logger = logging.getLogger("Screener")
         self.cache_path = Path(__file__).resolve().parents[2] / "data" / "screener_cache.json"
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-        # Details of the most recent scan, for the Discord report
         self.last_picks: List[dict] = []
         self.last_qualified = 0
         self.last_scanned = 0
-        # Per-criterion rejection tally — shows which filter is actually binding
         self._reject: dict[str, int] = {}
 
     # ── Universe ───────────────────────────────────────────────────────────
 
     def _fetch_universe(self) -> List[str]:
-        """NASDAQ / NYSE / NYSE ARCA common-stock symbols.
-
-        Removed: other venues (NYSE American, Cboe BZX, IEX), ETFs and ETNs,
-        closed-end funds, preferreds, warrants/units/rights, debt issues, test
-        issues, and issuers flagged financially deficient, delinquent or bankrupt.
-        """
         symbols: set[str] = set()
         headers = {"User-Agent": "Mozilla/5.0"}
 
@@ -186,6 +179,13 @@ class MomentumScreener:
         if last_close <= 0:
             rej["no_data"] += 1
             return None
+        
+        if self.PRICE_MIN is not None and last_close < self.PRICE_MIN:
+            rej["price_band"] += 1
+            return None
+        if self.PRICE_MAX is not None and last_close > self.PRICE_MAX:
+            rej["price_band"] += 1
+            return None
 
         # 1. Dollar volume — MEDIAN over the window, so a name only qualifies if it
         #    is liquid on a typical day. A mean (especially a 2-day mean) is carried
@@ -198,12 +198,15 @@ class MomentumScreener:
         # 2. One-day spike guard — reject blow-off names whose entire move is a
         #    single session (XHG: +350% on 86M shares, a few thousand the day
         #    before, 2M the day after). That is a liquidity event, not a trend,
-        #    and it leaves no stable ATR to size a stop against.
-        daily_moves = close.pct_change().tail(self.SPIKE_LOOKBACK).abs()
-        biggest_day = float(daily_moves.max()) if len(daily_moves) else float("nan")
-        if not pd.isna(biggest_day) and biggest_day > self.MAX_SINGLE_DAY_MOVE:
-            rej["one_day_spike"] += 1
-            return None
+        #    and it leaves no stable ATR to size a stop against. Disabled for the
+        #    short screener: an explosive single day is exactly what makes a
+        #    small cap short-worthy, not a red flag there.
+        if self.ENABLE_SPIKE_GUARD:
+            daily_moves = close.pct_change().tail(self.SPIKE_LOOKBACK).abs()
+            biggest_day = float(daily_moves.max()) if len(daily_moves) else float("nan")
+            if not pd.isna(biggest_day) and biggest_day > self.MAX_SINGLE_DAY_MOVE:
+                rej["one_day_spike"] += 1
+                return None
 
         # 3. APTR — ATR as a fraction of price
         prev_close = close.shift(1)
@@ -229,43 +232,78 @@ class MomentumScreener:
             rej["aptr"] += 1
             return None
 
-        # 4. BMU — % gain over the lookback (clipped to available history)
+        # 4. BMU — momentum, clipped to available history. "cumulative" is the
+        #    % gain over the lookback (long); "max_single_day" is the biggest
+        #    single-day move within it (short — a spike, not a smooth trend).
         lookback = min(self.BMU_PERIOD, bars - 1)
-        past_close = float(close.iloc[-1 - lookback])
-        if past_close <= 0:
-            rej["no_data"] += 1
-            return None
-        bmu = (last_close / past_close) - 1.0
+        if self.BMU_MODE == "max_single_day":
+            recent_moves = close.pct_change().tail(lookback)
+            bmu = float(recent_moves.max()) if len(recent_moves) else float("nan")
+            if pd.isna(bmu):
+                rej["no_data"] += 1
+                return None
+        else:
+            past_close = float(close.iloc[-1 - lookback])
+            if past_close <= 0:
+                rej["no_data"] += 1
+                return None
+            bmu = (last_close / past_close) - 1.0
         if bmu < bmu_min:
             rej["bmu"] += 1
             return None
 
-        # 5. Healthy trend — above the 10SMA
-        if self.MUST_BE_ABOVE_10SMA:
+        # 4b. Same-day volume confirmation — this reads the latest DAILY bar's
+        #     volume, not literal pre-market volume (yfinance daily history is
+        #     regular-session only). Live's 5-minute gate is what actually
+        #     checks real volume at trade time.
+        if self.MIN_VOLUME_RATIO is not None:
+            vol_avg = float(volume.rolling(20).mean().iloc[-1])
+            latest_vol = float(volume.iloc[-1])
+            if pd.isna(vol_avg) or vol_avg <= 0 or (latest_vol / vol_avg) < self.MIN_VOLUME_RATIO:
+                rej["volume_ratio"] += 1
+                return None
+
+        # 5. Trend filter, direction set by TREND_MODE — long requires ABOVE its
+        #    10SMA (healthy uptrend), short requires BELOW it (already cracking).
+        if self.ENABLE_TREND_FILTER:
             sma10 = float(close.rolling(10).mean().iloc[-1])
-            if pd.isna(sma10) or last_close <= sma10:
+            if pd.isna(sma10):
+                rej["sma10"] += 1
+                return None
+            trend_ok = (last_close > sma10) if self.TREND_MODE == "above" else (last_close < sma10)
+            if not trend_ok:
                 rej["sma10"] += 1
                 return None
 
         # 6. Not at highs — compare against the high of the PRIOR window, excluding
         #    the latest bar (including it makes the test vacuous, since today's
-        #    intraday high is almost always ≥ today's close).
+        #    intraday high is almost always ≥ today's close). Long requires having
+        #    pulled back from the high; the short screener skips this — sitting
+        #    near the recent high is exactly the blow-off-top setup it wants.
         prior_high = high.iloc[-1 - self.NOT_AT_HIGHS_PERIOD:-1]
         highest = float(prior_high.max()) if len(prior_high) else float("nan")
-        if pd.isna(highest) or last_close >= highest:
-            rej["at_highs"] += 1
-            return None
+        if self.REQUIRE_NOT_AT_HIGHS:
+            if pd.isna(highest) or last_close >= highest:
+                rej["at_highs"] += 1
+                return None
 
         # 7. Extension above the 50SMA, measured in ATRs (skipped for IPO names
-        #    that don't have 50 bars yet).
+        #    that don't have 50 bars yet). Long caps it (don't chase an already-
+        #    overextended name); short requires a MINIMUM extension instead —
+        #    that distance from the 50SMA is the mean-reversion setup itself.
         extension = None
         if bars >= self.SMA50_MIN_BARS:
             sma50 = float(close.rolling(50).mean().iloc[-1])
             if not pd.isna(sma50):
                 extension = (last_close - sma50) / atr
-                if extension > self.MAX_50SMA_EXTENSION_APTRS:
-                    rej["extension"] += 1
-                    return None
+                if self.EXTENSION_MODE == "max":
+                    if extension > self.MAX_50SMA_EXTENSION_APTRS:
+                        rej["extension"] += 1
+                        return None
+                else:
+                    if extension < self.MIN_50SMA_EXTENSION_APTRS:
+                        rej["extension"] += 1
+                        return None
 
         return {
             "symbol": symbol,
@@ -279,6 +317,7 @@ class MomentumScreener:
             # far below = broken down. The pass/fail check alone throws this away.
             "pct_from_high": (highest - last_close) / highest if highest > 0 else 0.0,
             "sector": None,   # filled in for the final picks only (needs a .info call)
+            "direction": self.PICK_DIRECTION,
         }
 
     # ── Scan ───────────────────────────────────────────────────────────────
@@ -293,8 +332,8 @@ class MomentumScreener:
         self.logger.info("Scanning %d US listed symbols for momentum leaders...", len(universe))
         results: List[dict] = []
         self._reject = {k: 0 for k in
-                        ("no_data", "short_history", "dollar_vol", "one_day_spike",
-                         "aptr", "bmu", "sma10", "at_highs", "extension")}
+                        ("no_data", "short_history", "price_band", "dollar_vol", "one_day_spike",
+                         "aptr", "bmu", "volume_ratio", "sma10", "at_highs", "extension")}
         evaluated = 0
         lost_batches = 0
 
@@ -346,11 +385,11 @@ class MomentumScreener:
         r = self._reject
         self.logger.info(
             "Screen funnel | universe=%d evaluated=%d lost_batches=%d || rejected: "
-            "no_data=%d short_history=%d $vol=%d spike=%d APTR=%d BMU=%d <10SMA=%d "
-            "at_highs=%d extension=%d || qualified=%d",
+            "no_data=%d short_history=%d price=%d $vol=%d spike=%d APTR=%d BMU=%d volratio=%d "
+            "<10SMA=%d at_highs=%d extension=%d || qualified=%d",
             len(universe), evaluated, lost_batches,
-            r["no_data"], r["short_history"], r["dollar_vol"], r["one_day_spike"],
-            r["aptr"], r["bmu"], r["sma10"], r["at_highs"], r["extension"], len(results),
+            r["no_data"], r["short_history"], r["price_band"], r["dollar_vol"], r["one_day_spike"],
+            r["aptr"], r["bmu"], r["volume_ratio"], r["sma10"], r["at_highs"], r["extension"], len(results),
         )
 
         self.last_scanned = len(universe)
@@ -372,6 +411,21 @@ class MomentumScreener:
             return dict(pairs)
         except Exception as exc:
             self.logger.warning("Sector lookup failed: %s", exc)
+            return {}
+
+    async def _fetch_market_caps(self, symbols: List[str]) -> dict[str, float]:
+        async def one(sym: str) -> tuple[str, float]:
+            try:
+                info = await asyncio.to_thread(lambda: yf.Ticker(sym).info)
+                return sym, float(info.get("marketCap") or 0.0)
+            except Exception:
+                return sym, 0.0
+
+        try:
+            pairs = await asyncio.gather(*(one(s) for s in symbols))
+            return dict(pairs)
+        except Exception as exc:
+            self.logger.warning("Market-cap lookup failed: %s", exc)
             return {}
 
     async def screen(self) -> List[str]:
@@ -436,3 +490,67 @@ class MomentumScreener:
             self.logger.info("Using cached screen from today: %s", cached)
             return cached
         return await self.screen()
+
+
+class SmallCapShortScreener(MomentumScreener):
+    """Daily scan for small-cap short-selling candidates: names that pumped
+    hard on thin liquidity and are now showing the first signs of rolling
+    over — the mirror image of the long momentum screener, not a copy of it.
+    """
+
+    DOLLAR_VOL_PERIOD = 10
+    DOLLAR_VOL_MIN = 20_000_000
+    ENABLE_SPIKE_GUARD = False
+    BMU_MODE = "max_single_day"
+    BMU_PERIOD = 10          # lookback to find the spike day within
+    BMU_MIN = 0.50           # the spike itself must be ≥50% in one day
+    MIN_VOLUME_RATIO = 2.0
+    TREND_MODE = "below"
+    REQUIRE_NOT_AT_HIGHS = False
+    EXTENSION_MODE = "min"
+    PRICE_MIN = 1.0          # sub-$1 halt/delisting risk — not a size proxy
+    MIN_MARKET_CAP = 100_000_000.0
+    MAX_MARKET_CAP = 1_500_000_000.0
+    TOP_N = 60
+    FINAL_N = 5
+    PICK_DIRECTION = "SHORT"
+    SHORTLIST_POOL_MULT = 3
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cache_path = Path(__file__).resolve().parents[2] / "data" / "screener_cache_short.json"
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+    async def screen(self) -> List[str]:
+        leaders = await asyncio.to_thread(self._screen_sync)
+        if not leaders:
+            self.logger.warning("Short screener found no qualifying candidates.")
+            return []
+
+        ranked = sorted(leaders, key=lambda r: r["bmu"], reverse=True)
+        pool = ranked[: self.FINAL_N * self.SHORTLIST_POOL_MULT]
+        market_caps = await self._fetch_market_caps([r["symbol"] for r in pool])
+
+        lo = self.MIN_MARKET_CAP if self.MIN_MARKET_CAP is not None else 0.0
+        hi = self.MAX_MARKET_CAP if self.MAX_MARKET_CAP is not None else float("inf")
+        pool = [r for r in pool if lo <= market_caps.get(r["symbol"], 0.0) <= hi]
+
+        picks = pool[: self.FINAL_N]
+        symbols = [r["symbol"] for r in picks]
+
+        sectors = await self._fetch_sectors(symbols)
+        for r in picks:
+            r["sector"] = sectors.get(r["symbol"], "—")
+            r["market_cap"] = market_caps.get(r["symbol"], 0.0)
+        self.last_picks = picks
+
+        self.logger.info("%d short candidates qualified — shorting top %d by BMU:", len(leaders), len(symbols))
+        for r in picks:
+            self.logger.info(
+                "  %-6s BMU %+6.1f%% | APTR %4.1f%% | $vol %6.0fM | mktcap $%.0fM | $%.2f",
+                r["symbol"], r["bmu"] * 100, r["aptr"] * 100,
+                r["dollar_volume"] / 1e6, r.get("market_cap", 0.0) / 1e6, r["price"],
+            )
+
+        self._write_cache(symbols)
+        return symbols
