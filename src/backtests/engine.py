@@ -218,10 +218,8 @@ class BacktestEngine:
     TAKE_PROFIT_ATR_MULT = 3.0      # TP1 — first profit at entry + 3×ATR
     TAKE_PROFIT_2_ATR_MULT = 6.0    # TP2 — runner target at entry + 6×ATR
     SCALE_OUT_PCT = 0.60            # sell 60% at TP1, run the remaining 40%
-    # Kept well below DAILY_LOSS_LIMIT_PCT so one stop-out can't halt the day:
-    # 1.5% / 0.25% = 6 full-risk losers before the circuit breaker trips.
-    RISK_PER_TRADE = 0.0025   # size so each trade risks 0.25% of equity to the stop
-    MAX_POSITION_PCT = 0.10   # hard ceiling on position size (caps the risk-parity result)
+    LONG_POSITION_PCT = 0.10    # each long = 10% of equity (notional)
+    SHORT_POSITION_PCT = 0.015  # each short = 1.5% of equity (notional)
     LLM_CONF_THRESHOLD = 0.70 # min LLM confidence to open a trade
     MIN_HOLD_BARS = 5         # 25 minutes before AI-reversal exit allowed
     COOLDOWN_BARS = 3         # 15-minute cooldown after close
@@ -809,15 +807,8 @@ class BacktestEngine:
                     continue
                 conf = llm_conf
 
-                # Constant-risk sizing: risk RISK_PER_TRADE of equity to the ATR stop,
-                # so a stop-out costs the same regardless of the stock's volatility.
-                # Capped at MAX_POSITION_PCT of equity (also the fallback when ATR is 0).
-                max_shares = (equity * self.MAX_POSITION_PCT) / fill_price
-                if current_atr > 0:
-                    risk_shares = (equity * self.RISK_PER_TRADE) / (self.STOP_ATR_MULT * current_atr)
-                    qty = max(1, int(min(risk_shares, max_shares)))
-                else:
-                    qty = max(1, int(max_shares))
+                position_pct = self.SHORT_POSITION_PCT if allow_short else self.LONG_POSITION_PCT
+                qty = max(1, int((equity * position_pct) / fill_price))
                 direction = "SHORT" if allow_short else "LONG"
                 entry_price = fill_price
                 entry_time = current_time

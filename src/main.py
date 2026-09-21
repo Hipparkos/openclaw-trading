@@ -311,10 +311,8 @@ async def main() -> None:
     TAKE_PROFIT_2_ATR_MULT = 6.0  # TP2 — runner target at entry + 6 × entry-time ATR
     SCALE_OUT_PCT = 0.60          # sell 60% at TP1, run the remaining 40%
     MIN_HOLD_MINUTES = 25         # 5 × 5m bars before take-profit / reversal exits
-    # Kept well below DAILY_LOSS_LIMIT_PCT so one stop-out can't halt the day:
-    # 1.5% / 0.25% = 6 full-risk losers before the circuit breaker trips.
-    RISK_PER_TRADE = 0.0025       # size so each trade risks 0.25% of equity to the stop
-    MAX_POSITION_PCT = 0.10       # hard ceiling on position size (caps the risk-parity result)
+    LONG_POSITION_PCT = 0.10      # each long = 10% of equity (notional)
+    SHORT_POSITION_PCT = 0.015    # each short = 1.5% of equity (notional)
     LLM_CONF_THRESHOLD = 0.70     # min LLM confidence to open a trade
     MAX_GROSS_EXPOSURE_PCT = 0.90 # no new BUYs once open positions ≥ 90% of equity
     SCREEN_HOUR_ET = 9            # daily re-screen fires from 09:00 ET (pre-open)
@@ -668,19 +666,11 @@ async def main() -> None:
                         )
                         return
 
-                    # Constant-risk sizing: risk RISK_PER_TRADE of equity to the ATR stop,
-                    # so a stop-out costs the same whatever the stock's volatility. Capped
-                    # at MAX_POSITION_PCT of equity (also the fallback when ATR is 0).
-                    max_shares = (account_equity * MAX_POSITION_PCT) / current_price if account_equity > 0.0 else 0.0
-                    if account_equity > 0.0 and current_atr > 0.0:
-                        risk_shares = (account_equity * RISK_PER_TRADE) / (STOP_ATR_MULT * current_atr)
-                        trade_size = max(1, int(min(risk_shares, max_shares)))
-                    else:
-                        trade_size = max(1, int(max_shares))
+                    trade_size = max(1, int((account_equity * LONG_POSITION_PCT) / current_price)) \
+                        if account_equity > 0.0 else 1
                     logger.info(
-                        "%s sizing | equity $%.2f | ATR $%.3f | risk %.1f%% | cap %.0f%% | shares → %d",
-                        symbol, account_equity, current_atr, RISK_PER_TRADE * 100,
-                        MAX_POSITION_PCT * 100, trade_size,
+                        "%s sizing | equity $%.2f | %.1f%% position | shares → %d",
+                        symbol, account_equity, LONG_POSITION_PCT * 100, trade_size,
                     )
 
                     # Enter with a bracket order: a market BUY plus an attached resting
@@ -774,16 +764,11 @@ async def main() -> None:
                         )
                         return
 
-                    max_shares = (account_equity * MAX_POSITION_PCT) / current_price if account_equity > 0.0 else 0.0
-                    if account_equity > 0.0 and current_atr > 0.0:
-                        risk_shares = (account_equity * RISK_PER_TRADE) / (STOP_ATR_MULT * current_atr)
-                        trade_size = max(1, int(min(risk_shares, max_shares)))
-                    else:
-                        trade_size = max(1, int(max_shares))
+                    trade_size = max(1, int((account_equity * SHORT_POSITION_PCT) / current_price)) \
+                        if account_equity > 0.0 else 1
                     logger.info(
-                        "%s SHORT sizing | equity $%.2f | ATR $%.3f | risk %.1f%% | cap %.0f%% | shares → %d",
-                        symbol, account_equity, current_atr, RISK_PER_TRADE * 100,
-                        MAX_POSITION_PCT * 100, trade_size,
+                        "%s SHORT sizing | equity $%.2f | %.1f%% position | shares → %d",
+                        symbol, account_equity, SHORT_POSITION_PCT * 100, trade_size,
                     )
 
                     # Cover-stop sits ABOVE entry — a short loses money as price rises.

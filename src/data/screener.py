@@ -300,7 +300,7 @@ class MomentumScreener:
                     if extension > self.MAX_50SMA_EXTENSION_APTRS:
                         rej["extension"] += 1
                         return None
-                else:
+                elif self.EXTENSION_MODE == "min":
                     if extension < self.MIN_50SMA_EXTENSION_APTRS:
                         rej["extension"] += 1
                         return None
@@ -498,16 +498,17 @@ class SmallCapShortScreener(MomentumScreener):
     over — the mirror image of the long momentum screener, not a copy of it.
     """
 
-    DOLLAR_VOL_PERIOD = 10
-    DOLLAR_VOL_MIN = 20_000_000
+    DOLLAR_VOL_PERIOD = 5
+    DOLLAR_VOL_MIN = 500_000
     ENABLE_SPIKE_GUARD = False
+    APTR_MIN = 0.0           # volatility floor off
     BMU_MODE = "max_single_day"
-    BMU_PERIOD = 10          # lookback to find the spike day within
+    BMU_PERIOD = 5           # lookback to find the spike day within
     BMU_MIN = 0.50           # the spike itself must be ≥50% in one day
     MIN_VOLUME_RATIO = 2.0
-    TREND_MODE = "below"
+    ENABLE_TREND_FILTER = False
     REQUIRE_NOT_AT_HIGHS = False
-    EXTENSION_MODE = "min"
+    EXTENSION_MODE = "off"
     PRICE_MIN = 1.0          # sub-$1 halt/delisting risk — not a size proxy
     MIN_MARKET_CAP = 100_000_000.0
     MAX_MARKET_CAP = 1_500_000_000.0
