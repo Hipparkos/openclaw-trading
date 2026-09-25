@@ -220,40 +220,52 @@ class TradingCommands(commands.Cog):
             logging.error("!sellall failed: %s", exc)
             await ctx.send("Liquidation encountered an error. Check the logs.")
 
-    @commands.command(name="add")
-    async def add_ticker(self, ctx, *, tickers: str = None):
+    async def _add_tickers(self, ctx, tickers: str | None, as_short: bool) -> None:
+        cmd = "!addshort" if as_short else "!add"
         if not self.bot.settings:
             await ctx.send("Bot settings not available yet.")
             return
         if not tickers:
-            await ctx.send("Usage: `!add AAPL` or `!add AAPL, NOW, MSFT`")
+            await ctx.send(f"Usage: `{cmd} AAPL` or `{cmd} AAPL, NOW, MSFT`")
             return
 
         symbols = [s.strip().upper() for s in tickers.split(",") if s.strip()]
         if not symbols:
-            await ctx.send("Usage: `!add AAPL` or `!add AAPL, NOW, MSFT`")
+            await ctx.send(f"Usage: `{cmd} AAPL` or `{cmd} AAPL, NOW, MSFT`")
             return
 
         watchlist: list = self.bot.settings.setdefault("tickers", [])
-        added = []
-        skipped = []
+        added, skipped, retagged = [], [], []
 
         for symbol in symbols:
+            was_short = symbol in self.bot.short_watchlist
+            if as_short:
+                self.bot.short_watchlist.add(symbol)
+            else:
+                self.bot.short_watchlist.discard(symbol)
+
             if symbol in watchlist:
-                skipped.append(symbol)
+                (retagged if was_short != as_short else skipped).append(symbol)
             else:
                 watchlist.append(symbol)
                 added.append(symbol)
 
+        side = "SHORT" if as_short else "LONG"
         embed = discord.Embed(
-            title="Watchlist Updated",
-            color=0x00FF00 if added else 0xAAAAAA,
+            title=f"Watchlist Updated — {side}",
+            color=0xFF6600 if as_short else 0x00FF00,
         )
         if added:
-            embed.add_field(name="Added", value=" | ".join(f"`{s}`" for s in added), inline=False)
+            embed.add_field(name=f"Added ({side})", value=" | ".join(f"`{s}`" for s in added), inline=False)
+        if retagged:
+            embed.add_field(name=f"Switched to {side}", value=" | ".join(f"`{s}`" for s in retagged), inline=False)
         if skipped:
-            embed.add_field(name="Already on watchlist", value=" | ".join(f"`{s}`" for s in skipped), inline=False)
-        embed.add_field(name="Current Watchlist", value=" | ".join(watchlist), inline=False)
+            embed.add_field(name=f"Already watched as {side}", value=" | ".join(f"`{s}`" for s in skipped), inline=False)
+
+        shorts = sorted(self.bot.short_watchlist)
+        longs = [t for t in watchlist if t not in self.bot.short_watchlist]
+        embed.add_field(name=f"Long ({len(longs)})", value=" | ".join(longs) or "_(none)_", inline=False)
+        embed.add_field(name=f"Short ({len(shorts)})", value=" | ".join(shorts) or "_(none)_", inline=False)
 
         if added and callable(getattr(self.bot, "on_add_ticker", None)):
             for symbol in added:
@@ -265,6 +277,16 @@ class TradingCommands(commands.Cog):
             )
 
         await ctx.send(embed=embed)
+
+    @commands.command(name="add")
+    async def add_ticker(self, ctx, *, tickers: str = None):
+        """Watch ticker(s) for LONG entries."""
+        await self._add_tickers(ctx, tickers, as_short=False)
+
+    @commands.command(name="addshort")
+    async def add_short_ticker(self, ctx, *, tickers: str = None):
+        """Watch ticker(s) for SHORT entries — same as the short screener's picks."""
+        await self._add_tickers(ctx, tickers, as_short=True)
 
     @commands.command(name="remove")
     async def remove_ticker(self, ctx, *, tickers: str = None):
@@ -285,6 +307,7 @@ class TradingCommands(commands.Cog):
         not_found = []
 
         for symbol in symbols:
+            self.bot.short_watchlist.discard(symbol)
             if symbol in watchlist:
                 watchlist.remove(symbol)
                 removed.append(symbol)

@@ -252,14 +252,14 @@ class MomentumScreener:
             rej["bmu"] += 1
             return None
 
-        # 4b. Same-day volume confirmation — this reads the latest DAILY bar's
-        #     volume, not literal pre-market volume (yfinance daily history is
-        #     regular-session only). Live's 5-minute gate is what actually
-        #     checks real volume at trade time.
+        # 4b. Volume confirmation across the same window the spike is found in —
+        #     the spike day itself is what needs the volume, not necessarily the
+        #     latest bar (the spike may be several days back). Daily bars are
+        #     regular-session only; live's 5-minute gate checks real-time volume.
         if self.MIN_VOLUME_RATIO is not None:
-            vol_avg = float(volume.rolling(20).mean().iloc[-1])
-            latest_vol = float(volume.iloc[-1])
-            if pd.isna(vol_avg) or vol_avg <= 0 or (latest_vol / vol_avg) < self.MIN_VOLUME_RATIO:
+            vol_ratios = (volume / volume.rolling(20).mean()).tail(lookback)
+            peak_ratio = float(vol_ratios.max()) if len(vol_ratios) else float("nan")
+            if pd.isna(peak_ratio) or peak_ratio < self.MIN_VOLUME_RATIO:
                 rej["volume_ratio"] += 1
                 return None
 
@@ -504,8 +504,8 @@ class SmallCapShortScreener(MomentumScreener):
     APTR_MIN = 0.0           # volatility floor off
     BMU_MODE = "max_single_day"
     BMU_PERIOD = 5           # lookback to find the spike day within
-    BMU_MIN = 0.50           # the spike itself must be ≥50% in one day
-    MIN_VOLUME_RATIO = 2.0
+    BMU_MIN = 0.25           # the spike itself must be ≥25% in one day
+    MIN_VOLUME_RATIO = 1.5
     ENABLE_TREND_FILTER = False
     REQUIRE_NOT_AT_HIGHS = False
     EXTENSION_MODE = "off"
@@ -515,7 +515,7 @@ class SmallCapShortScreener(MomentumScreener):
     TOP_N = 60
     FINAL_N = 5
     PICK_DIRECTION = "SHORT"
-    SHORTLIST_POOL_MULT = 3
+    SHORTLIST_POOL_MULT = 6
 
     def __init__(self) -> None:
         super().__init__()
@@ -534,7 +534,22 @@ class SmallCapShortScreener(MomentumScreener):
 
         lo = self.MIN_MARKET_CAP if self.MIN_MARKET_CAP is not None else 0.0
         hi = self.MAX_MARKET_CAP if self.MAX_MARKET_CAP is not None else float("inf")
-        pool = [r for r in pool if lo <= market_caps.get(r["symbol"], 0.0) <= hi]
+        in_band, too_small, too_big, unknown = [], 0, 0, 0
+        for r in pool:
+            cap = market_caps.get(r["symbol"], 0.0)
+            if cap <= 0.0:
+                unknown += 1          # .info lookup failed or is rate-limited
+            elif cap < lo:
+                too_small += 1
+            elif cap > hi:
+                too_big += 1
+            else:
+                in_band.append(r)
+        self.logger.info(
+            "Market-cap filter | shortlisted=%d in-band=%d too_small=%d too_big=%d unknown=%d (band $%.0fM–$%.0fM)",
+            len(pool), len(in_band), too_small, too_big, unknown, lo / 1e6, hi / 1e6,
+        )
+        pool = in_band
 
         picks = pool[: self.FINAL_N]
         symbols = [r["symbol"] for r in picks]
