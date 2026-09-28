@@ -123,6 +123,26 @@ class OrderManager:
                 continue
         return total
 
+    # Live quote at execution time. The 5m bar buffer only holds completed bars,
+    # so its close can be minutes stale — fine for signals, wrong for sizing,
+    # stop placement and the recorded entry. Returns 0.0 if no usable quote.
+    async def get_quote(self, symbol: str) -> float:
+        try:
+            contract = await self._qualify_stock(symbol)
+            [ticker] = await self.ib.reqTickersAsync(contract)
+        except Exception as exc:
+            self.logger.warning("Quote lookup failed for %s: %s", symbol, exc)
+            return 0.0
+
+        for value in (ticker.marketPrice(), ticker.last, ticker.close):
+            try:
+                price = float(value)
+            except (TypeError, ValueError):
+                continue
+            if price > 0.0 and price == price:   # reject NaN
+                return price
+        return 0.0
+
     # Convenience market order - quick market submit
     async def place_market_order(self, symbol: str, action: str, quantity: float) -> Any:
         order = MarketOrder(action.upper(), quantity, tif="DAY")

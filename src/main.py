@@ -612,6 +612,19 @@ async def main() -> None:
                     market_story=market_story,
                 )
 
+            async def _execution_price(symbol: str, bar_price: float) -> float:
+                """Live quote for sizing/stop/entry. Falls back to the bar close if
+                the feed gives nothing usable (e.g. no market-data entitlement)."""
+                quote = await order_manager.get_quote(symbol)
+                if quote <= 0.0:
+                    logger.warning("%s: no live quote — using bar close $%.2f.", symbol, bar_price)
+                    return bar_price
+                drift_pct = abs(quote - bar_price) / bar_price * 100 if bar_price > 0 else 0.0
+                if drift_pct >= 0.25:
+                    logger.info("%s: bar close $%.2f → live $%.2f (%.2f%% drift).",
+                                symbol, bar_price, quote, drift_pct)
+                return quote
+
             async def _route_trade(
                 symbol: str,
                 signal_direction: str,
@@ -668,6 +681,8 @@ async def main() -> None:
                     if current_price <= 0.0:
                         logger.warning("%s: BUY skipped — no valid price yet.", symbol)
                         return
+
+                    current_price = await _execution_price(symbol, current_price)
 
                     account_equity = order_manager.get_account_equity()
 
@@ -769,6 +784,8 @@ async def main() -> None:
                     if current_price <= 0.0:
                         logger.warning("%s: SHORT skipped — no valid price yet.", symbol)
                         return
+
+                    current_price = await _execution_price(symbol, current_price)
 
                     account_equity = order_manager.get_account_equity()
                     gross_exposure = order_manager.get_gross_position_value()
