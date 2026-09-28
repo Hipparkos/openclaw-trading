@@ -772,6 +772,17 @@ class OpenClawDiscord(commands.Bot):
 
         embed.add_field(name="AI Confidence — Wins", value=f"{stats.get('avg_confidence_wins', 0.0):.2f}", inline=True)
         embed.add_field(name="AI Confidence — Losses", value=f"{stats.get('avg_confidence_losses', 0.0):.2f}", inline=True)
+        embed.add_field(name="​", value="​", inline=True)
+
+        def _side_line(s: dict) -> str:
+            if not s.get("trades"):
+                return "_no trades_"
+            sign = "+" if s["net_pnl"] >= 0 else ""
+            return f"`{s['trades']} trades · {sign}${s['net_pnl']:,.2f} · {s['win_rate']:.0f}% win`"
+
+        embed.add_field(name="​", value="**— LONG vs SHORT —**", inline=False)
+        embed.add_field(name="Long", value=_side_line(stats.get("long", {})), inline=True)
+        embed.add_field(name="Short", value=_side_line(stats.get("short", {})), inline=True)
 
         await channel.send(embed=embed)
 

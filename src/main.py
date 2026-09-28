@@ -152,6 +152,8 @@ def _compute_eod_stats(trades: List[Dict[str, Any]], account_equity: float) -> D
             "largest_loss": 0.0,
             "avg_confidence_wins": 0.0,
             "avg_confidence_losses": 0.0,
+            "long": {"trades": 0, "net_pnl": 0.0, "win_rate": 0.0},
+            "short": {"trades": 0, "net_pnl": 0.0, "win_rate": 0.0},
         }
 
     net_pnl = sum(t["pnl"] for t in trades)
@@ -169,11 +171,22 @@ def _compute_eod_stats(trades: List[Dict[str, Any]], account_equity: float) -> D
     avg_conf_win = sum(conf_wins) / len(conf_wins) if conf_wins else 0.0
     avg_conf_loss = sum(conf_losses) / len(conf_losses) if conf_losses else 0.0
 
+    def _side(name: str) -> Dict[str, Any]:
+        rows = [t for t in trades if (t.get("direction") or "LONG").upper() == name]
+        wins = [t for t in rows if t["pnl"] >= 0]
+        return {
+            "trades": len(rows),
+            "net_pnl": sum(t["pnl"] for t in rows),
+            "win_rate": (len(wins) / len(rows) * 100) if rows else 0.0,
+        }
+
     return {
         "net_pnl": net_pnl,
         "account_equity": account_equity,
         "total_trades": total,
         "wins": len(win_trades),
+        "long": _side("LONG"),
+        "short": _side("SHORT"),
         "avg_win": avg_win,
         "avg_loss": avg_loss,
         "largest_win": largest_win,
@@ -352,14 +365,16 @@ async def main() -> None:
         *,
         symbol: str = "",
         entry_time: datetime | None = None,
+        is_long: bool = True,
     ) -> None:
         if entry_price > 0.0 and exit_price > 0.0:
-            pnl = (exit_price - entry_price) * quantity
+            pnl = ((exit_price - entry_price) if is_long else (entry_price - exit_price)) * quantity
             if symbol:
                 trade_history_db.record(
                     symbol=symbol,
                     pnl=pnl,
                     confidence=confidence,
+                    direction="LONG" if is_long else "SHORT",
                     entry_time=entry_time,
                     exit_time=datetime.now(timezone.utc),
                     entry_price=entry_price,
@@ -429,7 +444,7 @@ async def main() -> None:
                 exit_price = _get_last_price(symbol) or entry_price
                 confidence = float(trade_memory.get("entry_confidence", 0.0))
                 _record_closed_trade(entry_price, exit_price, close_qty, confidence,
-                                     symbol=symbol, entry_time=entry_time_mem)
+                                     symbol=symbol, entry_time=entry_time_mem, is_long=is_long)
 
                 if is_long:
                     outcome_pct = ((exit_price - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
@@ -579,7 +594,7 @@ async def main() -> None:
                 if mem:
                     entry_conf = float(mem.get("entry_confidence", 0.0))
                     _record_closed_trade(entry_price, exit_price, quantity, entry_conf,
-                                         symbol=symbol, entry_time=entry_time_mem)
+                                         symbol=symbol, entry_time=entry_time_mem, is_long=is_long)
                     await news_client.record_trade_memory_async(
                         symbol=symbol,
                         technical_context=str(mem.get("technical_context", market_story)),
@@ -1158,7 +1173,8 @@ async def main() -> None:
                                     trade_memory["stop_order"] = breakeven_stop
 
                                     _record_closed_trade(entry_price, current_price, scale_qty, entry_conf,
-                                                         symbol=symbol, entry_time=entry_time_tp)
+                                                         symbol=symbol, entry_time=entry_time_tp,
+                                                         is_long=is_long_pos)
                                     await discord_ui.send_close_alert(
                                         symbol=symbol,
                                         is_long=is_long_pos,
